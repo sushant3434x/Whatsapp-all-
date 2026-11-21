@@ -180,8 +180,9 @@ Available variables:
     </div>
 
     <div class="glass rounded-2xl p-5">
-      <h2 class="font-black text-lg mb-4">5. Message History</h2>
-      <div id="historyList" class="space-y-2 max-h-40 overflow-auto"></div>
+      <h2 class="font-black text-lg mb-1">5. Message History</h2>
+      <p class="text-[11px] text-slate-500 mb-3">Unsent members stay here with a <b>Send</b> button so you can retry them later.</p>
+      <div id="historyList" class="space-y-2 max-h-56 overflow-auto"></div>
       <button id="clearHistoryBtn" class="mt-3 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-bold">Clear History</button>
     </div>
   </div>
@@ -263,6 +264,7 @@ let timer = null;
 let unlocked = false;
 let currentCampaign = null;
 let currentOpened = false;
+let retryHistoryId = null;
 
 const $ = id => document.getElementById(id);
 
@@ -350,14 +352,60 @@ function updateAnalytics(){
 
 function renderHistory(){
   const el=$("historyList");
-  const h=getHistory().slice(0,12);
+  const h=getHistory().slice(0,30);
   el.innerHTML=h.length?h.map(x=>{
-    const label=x.type==="sent"?"✓ Sent":x.type==="skipped"?"↷ Skipped":"↗ Opened";
-    return `<div class="rounded-lg bg-slate-900/60 p-2 text-[11px]">
+    const isUnsent=x.type==="unsent" && x.status!=="sent";
+    const label=isUnsent?"⚠ Unsent":x.type==="sent"?"✓ Sent":x.type==="skipped"?"↷ Skipped":"↗ Opened";
+    const reason=x.reason?`<div class="text-[10px] text-amber-300 mt-1">${escapeHtml(x.reason)}</div>`:"";
+    const sendBtn=isUnsent?`<button data-retry-history="${escapeHtml(x.historyId||"")}" class="mt-2 px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-500 text-[10px] font-bold">Send</button>`:"";
+    return `<div class="rounded-lg bg-slate-900/60 p-2 text-[11px] border ${isUnsent?"border-amber-800":"border-transparent"}">
       <div class="flex justify-between gap-2"><b>${escapeHtml(label)}</b><span class="text-slate-500">${formatDateTime(x.at)}</span></div>
       <div class="text-slate-300 mt-1">${escapeHtml(x.memberName||"Member")} <span class="text-slate-500">• ${escapeHtml(x.campaignName||"Campaign")}</span></div>
+      ${reason}${sendBtn}
     </div>`;
-  }).join(""):`<div class="text-xs text-slate-500">No message history yet.</div>`;
+  }).join(""): `<div class="text-xs text-slate-500">No message history yet.</div>`;
+
+  el.querySelectorAll("[data-retry-history]").forEach(btn=>{
+    btn.addEventListener("click",()=>retryUnsent(btn.dataset.retryHistory));
+  });
+}
+
+function updateHistoryEntry(historyId, patch){
+  const h=getHistory();
+  const i=h.findIndex(x=>x.historyId===historyId);
+  if(i<0)return false;
+  h[i]={...h[i],...patch};
+  writeJSON(STORAGE.history,h.slice(0,500));
+  renderHistory();
+  updateAnalytics();
+  return true;
+}
+
+function createUnsentHistory(member, reason){
+  const historyId=`${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+  addHistory({
+    type:"unsent",
+    status:"unsent",
+    historyId,
+    campaignId:currentCampaign?.id,
+    campaignName:currentCampaign?.name,
+    memberId:member.id,
+    memberName:member.name||"Unnamed",
+    phoneNumber:member.phoneNumber||"",
+    reason
+  });
+  return historyId;
+}
+
+function retryUnsent(historyId){
+  const h=getHistory();
+  const item=h.find(x=>x.historyId===historyId && x.type==="unsent" && x.status!=="sent");
+  if(!item){toast("This unsent entry is no longer available.","error");return;}
+  const member=allMembers.find(m=>m.id===item.memberId);
+  if(!member){toast("Member is no longer available in Firestore.","error");return;}
+  retryHistoryId=historyId;
+  const opened=openWhatsApp(member, true);
+  if(!opened){retryHistoryId=null;}
 }
 
 function saveQueueState(){
@@ -537,16 +585,25 @@ function createCampaign(){
 let acfQueueWaitingForReturn=false;
 let acfQueueLastAdvanceAt=0;
 
-function openWhatsApp(member){
+function openWhatsApp(member, isRetry=false){
   const phone=normalizePhone(member.phoneNumber);
-  if(!phone){toast(`Phone number missing for ${member.name||"member"}`,"error");return false;}
+  if(!phone){
+    if(!isRetry) createUnsentHistory(member,"Phone number is missing");
+    else toast(`Phone number is missing for ${member.name||"member"}.`,"error");
+    return false;
+  }
   const msg=replaceVars($("message").value,member);
-  if(!msg.trim()){toast("Message is empty","error");return false;}
+  if(!msg.trim()){
+    if(!isRetry) createUnsentHistory(member,"Message is empty");
+    else toast("Message is empty.","error");
+    return false;
+  }
   const url=`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
   try{
     const popup=window.open(url,"_blank");
     if(!popup){
-      toast("WhatsApp could not be opened. Allow pop-ups for this app.","error");
+      if(!isRetry) createUnsentHistory(member,"WhatsApp could not be opened (popup blocked)");
+      else toast("WhatsApp could not be opened. Allow pop-ups for this app.","error");
       return false;
     }
     addHistory({
@@ -554,12 +611,14 @@ function openWhatsApp(member){
       campaignId:currentCampaign?.id,
       campaignName:currentCampaign?.name,
       memberId:member.id,
-      memberName:member.name||"Unnamed"
+      memberName:member.name||"Unnamed",
+      retryOf:isRetry?retryHistoryId:null
     });
     return true;
   }catch(e){
     console.warn("WhatsApp launch failed",e);
-    toast("WhatsApp could not be opened.","error");
+    if(!isRetry) createUnsentHistory(member,"WhatsApp launch error");
+    else toast("WhatsApp could not be opened.","error");
     return false;
   }
 }
@@ -585,32 +644,64 @@ function openNextQueueMember(){
   }
 
   const member=queue[queueIndex];
+
+  // No phone number: record as UNSENT and immediately move to the next member.
+  if(!normalizePhone(member.phoneNumber)){
+    createUnsentHistory(member,"Phone number is missing");
+    queueIndex++;
+    saveQueueState();
+    updateQueueUI();
+    setTimeout(openNextQueueMember,150);
+    return;
+  }
+
   acfQueueWaitingForReturn=true;
   saveQueueState();
   updateQueueUI();
 
-  const opened=openWhatsApp(member);
+  let opened=false;
+  try{
+    opened=openWhatsApp(member);
+  }catch(e){
+    console.error("Queue member error",e);
+    createUnsentHistory(member,`Unexpected error: ${e?.message||"unknown error"}`);
+    opened=false;
+  }
+
+  // Any launch error must never stop the queue. Record UNSENT and skip forward.
   if(!opened){
     acfQueueWaitingForReturn=false;
+    queueIndex++;
     saveQueueState();
+    updateQueueUI();
+    setTimeout(openNextQueueMember,150);
     return;
   }
 
   /*
-   * IMPORTANT:
-   * This intentionally mirrors the original gym app's Send All behavior:
-   * WhatsApp is opened for one member, and when the user returns to this
-   * page, the queue advances automatically to the next member.
+   * WhatsApp is opened for one member. When the user returns to this page,
+   * the queue advances automatically to the next member.
    */
 }
 
 function advanceQueueAfterReturn(){
-  if(stopped || !acfQueueWaitingForReturn)return;
+  if(stopped)return;
 
   const now=Date.now();
   if(now-acfQueueLastAdvanceAt<900)return;
   acfQueueLastAdvanceAt=now;
 
+  // A retry from Message History only updates that unsent entry; it does not
+  // alter the main queue position.
+  if(retryHistoryId){
+    const id=retryHistoryId;
+    retryHistoryId=null;
+    updateHistoryEntry(id,{status:"sent",type:"sent",sentAt:new Date().toISOString()});
+    toast("Retry opened. Marked as sent after returning from WhatsApp.","success");
+    return;
+  }
+
+  if(!acfQueueWaitingForReturn)return;
   acfQueueWaitingForReturn=false;
 
   if(queueIndex<queue.length){
