@@ -1,3 +1,4 @@
+```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -131,6 +132,7 @@ Available variables:
                 <th class="p-3 text-left">Plan</th>
                 <th class="p-3 text-left">Due</th>
                 <th class="p-3 text-left">Status</th>
+                <th class="p-3 text-left">Action</th>
               </tr>
             </thead>
             <tbody id="memberTable"></tbody>
@@ -160,11 +162,14 @@ Available variables:
         <button id="saveCampaignBtn" class="flex-1 py-2.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm font-bold">Save Draft</button>
         <button id="scheduleBtn" class="flex-1 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-bold">Schedule</button>
       </div>
-      <div id="resumeBox" class="hidden mt-3 p-3 rounded-xl bg-amber-950/30 border border-amber-800 text-xs">
-        <div class="font-bold text-amber-200">Resume available</div>
-        <div id="resumeText" class="text-slate-300 mt-1"></div>
-        <button id="resumeBtn" class="mt-2 px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 font-bold">Resume</button>
-        <button id="clearResumeBtn" class="mt-2 ml-1 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 font-bold">Clear</button>
+      <!-- Resume / Continue Remaining Members is ALWAYS visible -->
+      <div id="resumeBox" class="mt-3 p-3 rounded-xl bg-amber-950/30 border border-amber-800 text-xs">
+        <div class="font-bold text-amber-200">Resume / Continue Remaining Members</div>
+        <div id="resumeText" class="text-slate-300 mt-1">Checks complete Sent history (by member ID and phone) and skips previously sent members.</div>
+        <div class="flex flex-wrap gap-2 mt-2">
+          <button id="resumeBtn" class="px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 font-bold">Resume / Continue Remaining Members</button>
+          <button id="clearResumeBtn" class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 font-bold">Clear</button>
+        </div>
       </div>
     </div>
 
@@ -273,7 +278,26 @@ let currentCampaign = null;
 let currentOpened = false;
 let retryHistoryId = null;
 
+// Tracks an independent manual Send / Resend launched from a member row.
+// Completely separate from Send All queue state so it never interferes with Send All.
+let pendingManualSend = null;
+let clearHistoryConfirmPending = false;
+let clearHistoryConfirmTimer = null;
+
 const $ = id => document.getElementById(id);
+
+/**
+ * Safe option readers (preserve compatibility if optional toggles are present or omitted).
+ */
+function shouldSkipAlreadySent(){
+  const el = $("skipAlreadySent");
+  return el ? !!el.checked : true;
+}
+
+function shouldIncludeInactive(){
+  const el = $("includeInactive");
+  return el ? !!el.checked : false;
+}
 
 function toast(msg, type="info"){
   const t=$("toast");
@@ -344,29 +368,50 @@ function getHistory(){
   const h=readJSON(STORAGE.history,[]);
   return Array.isArray(h)?h:[];
 }
+
 function addHistory(event){
   const h=getHistory();
   h.unshift({...event,at:event.at||new Date().toISOString()});
   writeJSON(STORAGE.history,h.slice(0,5000));
   renderHistory();
   updateAnalytics();
+  refreshMemberActionButtons();
+  showResumeBox();
 }
+
+/**
+ * Builds an index of all Sent history records by member ID (doc id, memberId, memberCode)
+ * and normalized phone number so previously sent members are reliably skipped.
+ */
 function getSentIndex(){
   const ids=new Set(),phones=new Set();
   for(const x of getHistory()){
     if(x.type!=="sent" || x.status==="unsent") continue;
-    if(x.memberId) ids.add(String(x.memberId).trim().toLowerCase());
-    const p=normalizePhone(x.phoneNumber||"");
+    const candidateIds=[x.memberId,x.memberCode,x.docId,x.id];
+    for(const cid of candidateIds){
+      const norm=String(cid||"").trim().toLowerCase();
+      if(norm) ids.add(norm);
+    }
+    const p=normalizePhone(x.phoneNumber||x.phone||"");
     if(p) phones.add(p);
   }
   return {ids,phones};
 }
-function isHistorySentForMember(member){
-  const idx=getSentIndex();
-  const id=String(member?.id||member?.memberId||"").trim().toLowerCase();
+
+/**
+ * Checks whether a member has already been marked Sent in the complete Sent history
+ * by matching Firestore document ID, gym memberId, OR normalized phone number.
+ */
+function isHistorySentForMember(member, sentIndex=null){
+  const idx=sentIndex || getSentIndex();
+  const docId=String(member?.id||"").trim().toLowerCase();
+  const memId=String(member?.memberId||"").trim().toLowerCase();
   const phone=normalizePhone(member?.phoneNumber||"");
-  return idx.ids.has(id) || (phone && idx.phones.has(phone));
+  return (docId && idx.ids.has(docId))
+    || (memId && idx.ids.has(memId))
+    || (phone && idx.phones.has(phone));
 }
+
 function updateAnalytics(){
   const h=getHistory();
   $("aCampaigns").textContent=new Set(h.map(x=>x.campaignId).filter(Boolean)).size;
@@ -374,6 +419,7 @@ function updateAnalytics(){
   $("aSent").textContent=h.filter(x=>x.type==="sent" && x.status!=="unsent").length;
   $("aSkipped").textContent=h.filter(x=>x.type==="skipped").length;
 }
+
 function renderHistory(){
   const el=$("historyList");
   const h=getHistory();
@@ -393,6 +439,7 @@ function renderHistory(){
     btn.addEventListener("click",()=>retryUnsent(btn.dataset.retryHistory));
   });
 }
+
 function updateHistoryEntry(historyId, patch){
   const h=getHistory();
   const i=h.findIndex(x=>x.historyId===historyId);
@@ -401,8 +448,11 @@ function updateHistoryEntry(historyId, patch){
   writeJSON(STORAGE.history,h.slice(0,5000));
   renderHistory();
   updateAnalytics();
+  refreshMemberActionButtons();
+  showResumeBox();
   return true;
 }
+
 function downloadJSON(filename,data){
   const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
   const url=URL.createObjectURL(blob);
@@ -410,12 +460,14 @@ function downloadJSON(filename,data){
   a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
+
 function exportHistory(){
   const payload={format:"alpha-core-fitness-whatsapp-history",version:2,exportedAt:new Date().toISOString(),history:getHistory()};
   downloadJSON(`alpha_core_whatsapp_history_${new Date().toISOString().slice(0,10)}.json`,payload);
   $("backupStatus").textContent=`Exported ${payload.history.length} history records.`;
   toast(`Exported ${payload.history.length} history records.`,"success");
 }
+
 function exportFullBackup(){
   const payload={
     format:"alpha-core-fitness-whatsapp-full-backup",version:2,exportedAt:new Date().toISOString(),
@@ -426,6 +478,7 @@ function exportFullBackup(){
   $("backupStatus").textContent=`Full backup exported: ${payload.history.length} history records.`;
   toast("Full backup exported.","success");
 }
+
 function normalizeImportedHistory(raw){
   if(Array.isArray(raw)) return raw;
   if(Array.isArray(raw?.history)) return raw.history;
@@ -434,6 +487,7 @@ function normalizeImportedHistory(raw){
   if(Array.isArray(raw?.data)) return raw.data;
   return [];
 }
+
 function mergeHistory(imported){
   const current=getHistory();
   const combined=[...current,...imported],seen=new Set(),out=[];
@@ -441,6 +495,7 @@ function mergeHistory(imported){
     if(!x||typeof x!=="object")continue;
     const fp=JSON.stringify({
       historyId:x.historyId||"",type:x.type||"",memberId:x.memberId||"",
+      memberCode:x.memberCode||"",
       phoneNumber:normalizePhone(x.phoneNumber||x.phone||""),
       at:x.at||x.timestamp||x.sentAt||"",campaignId:x.campaignId||"",status:x.status||""
     });
@@ -453,6 +508,7 @@ function mergeHistory(imported){
   writeJSON(STORAGE.history,out.slice(0,5000));
   return {imported:imported.length,total:out.length,sent:out.filter(x=>x.type==="sent"&&x.status!=="unsent").length};
 }
+
 async function importHistoryFile(file){
   const raw=JSON.parse(await file.text());
   const imported=normalizeImportedHistory(raw);
@@ -461,9 +517,13 @@ async function importHistoryFile(file){
   if(raw?.draft)writeJSON(STORAGE.drafts,raw.draft);
   if(raw?.scheduledCampaign)writeJSON("acf_scheduled_campaign",raw.scheduledCampaign);
   $("backupStatus").textContent=`Imported ${r.imported} records • ${r.sent} total Sent records available for skip protection.`;
-  renderHistory();updateAnalytics();showResumeBox();
+  renderHistory();
+  updateAnalytics();
+  refreshMemberActionButtons();
+  showResumeBox();
   toast(`Imported ${r.imported} history records. ${r.sent} Sent records will be skipped.`,"success");
 }
+
 function migrateLegacyLocalHistory(){
   if(getHistory().length)return 0;
   const keys=["acf_whatsapp_history","acf_whatsapp_history_v1","acf_message_history","whatsapp_history","whatsappMessageHistory","messageHistory"];
@@ -476,15 +536,18 @@ function migrateLegacyLocalHistory(){
   if(!imported.length)return 0;
   return mergeHistory(imported).imported;
 }
-function createUnsentHistory(member, reason){
+
+function createUnsentHistory(member, reason, campaignOverride=null){
+  const camp=campaignOverride || currentCampaign;
   const historyId=`${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
   addHistory({
     type:"unsent",
     status:"unsent",
     historyId,
-    campaignId:currentCampaign?.id,
-    campaignName:currentCampaign?.name,
+    campaignId:camp?.id,
+    campaignName:camp?.name,
     memberId:member.id,
+    memberCode:member.memberId||"",
     memberName:member.name||"Unnamed",
     phoneNumber:member.phoneNumber||"",
     reason
@@ -496,22 +559,80 @@ function retryUnsent(historyId){
   const h=getHistory();
   const item=h.find(x=>x.historyId===historyId && x.type==="unsent" && x.status!=="sent");
   if(!item){toast("This unsent entry is no longer available.","error");return;}
-  const member=allMembers.find(m=>m.id===item.memberId);
+  const member=allMembers.find(m=>m.id===item.memberId || (item.memberCode && m.memberId===item.memberCode));
   if(!member){toast("Member is no longer available in Firestore.","error");return;}
   retryHistoryId=historyId;
   const opened=openWhatsApp(member, true);
   if(!opened){retryHistoryId=null;}
 }
 
+/**
+ * Resolves the candidate pool for Resume / Continue Remaining Members by checking
+ * the complete Sent history (by member ID and phone number), not just saved queueIndex.
+ */
+function buildResumeRemainingPool(){
+  const s=readJSON(STORAGE.state,null);
+  const sentIdx=getSentIndex();
+  const memberById=new Map(allMembers.map(m=>[m.id,m]));
+
+  // 1. If a saved queue exists, evaluate all members in that saved queue against complete Sent history.
+  if(s && Array.isArray(s.queueIds) && s.queueIds.length){
+    const includeInactiveSaved = typeof s.includeInactive==="boolean" ? s.includeInactive : shouldIncludeInactive();
+    const resolved=[];
+    for(const id of s.queueIds){
+      const m=memberById.get(id);
+      if(!m) continue;
+      if(!includeInactiveSaved && statusFor(m)==="Inactive") continue;
+      resolved.push(m);
+    }
+    const deduped=dedupeMembers(resolved);
+    const remaining=deduped.filter(m=>!isHistorySentForMember(m, sentIdx));
+    const skippedCount=deduped.length - remaining.length;
+
+    if(deduped.length){
+      return {
+        source:"saved",
+        state:s,
+        totalPool:deduped.length,
+        remaining,
+        skippedCount
+      };
+    }
+  }
+
+  // 2. Otherwise (fresh load, after history import, or cleared queue), build remaining pool
+  //    from currently selected members (or filtered/all members if none are selected).
+  let basePool = selectedIds.size
+    ? allMembers.filter(m=>selectedIds.has(m.id))
+    : (filteredMembers.length ? filteredMembers : allMembers);
+
+  if(!shouldIncludeInactive()){
+    basePool = basePool.filter(m=>statusFor(m)!=="Inactive");
+  }
+
+  const deduped=dedupeMembers(basePool);
+  const remaining=deduped.filter(m=>!isHistorySentForMember(m, sentIdx));
+  const skippedCount=deduped.length - remaining.length;
+
+  return {
+    source:selectedIds.size ? "selected" : "members",
+    state:null,
+    totalPool:deduped.length,
+    remaining,
+    skippedCount
+  };
+}
+
 function saveQueueState(){
   if(!currentCampaign || queueIndex>=queue.length){
     localStorage.removeItem(STORAGE.state);
+    showResumeBox();
     return;
   }
   writeJSON(STORAGE.state,{
     campaign:currentCampaign,
-    skipAlreadySent:$("skipAlreadySent").checked,
-    includeInactive:$("includeInactive").checked,
+    skipAlreadySent:shouldSkipAlreadySent(),
+    includeInactive:shouldIncludeInactive(),
     queueIds:queue.map(m=>m.id),
     queueIndex,
     batchEnd,
@@ -523,19 +644,37 @@ function saveQueueState(){
   showResumeBox();
 }
 
+/**
+ * Keeps the Resume / Continue Remaining Members panel ALWAYS visible and updates
+ * its summary using the complete Sent history.
+ */
 function showResumeBox(){
-  const s=readJSON(STORAGE.state,null);
   const box=$("resumeBox");
-  if(!s || !s.queueIds?.length || s.queueIndex>=s.queueIds.length){
-    box.classList.add("hidden"); return;
-  }
   box.classList.remove("hidden");
-  $("resumeText").textContent=`${s.campaign?.name||"Campaign"} — ${s.queueIndex} position, ${s.queueIds.length-s.queueIndex} remaining. Sent-history protection is applied.`;
+
+  if(!allMembers.length){
+    const s=readJSON(STORAGE.state,null);
+    if(s && s.queueIds?.length){
+      $("resumeText").textContent=`Saved campaign: ${s.campaign?.name||"Campaign"} (${s.queueIds.length} queued). Complete Sent history will be checked after members load.`;
+    }else{
+      $("resumeText").textContent="Ready to check complete Sent history (by member ID and phone) and continue remaining members once loaded.";
+    }
+    return;
+  }
+
+  const info=buildResumeRemainingPool();
+  if(info.source==="saved"){
+    const campName=info.state?.campaign?.name || "Saved Campaign";
+    $("resumeText").textContent=`${campName} — ${info.remaining.length} remaining unsent of ${info.totalPool} (${info.skippedCount} already Sent in history will be skipped).`;
+  }else{
+    const label=info.source==="selected" ? "selected eligible members" : "eligible members";
+    $("resumeText").textContent=`${info.remaining.length} remaining unsent of ${info.totalPool} ${label} (${info.skippedCount} already Sent in history will be skipped).`;
+  }
 }
 
 function clearResume(){
   localStorage.removeItem(STORAGE.state);
-  $("resumeBox").classList.add("hidden");
+  showResumeBox();
 }
 
 function campaignId(){
@@ -582,14 +721,41 @@ function applyFilters(){
     return modeOK && text.includes(q);
   });
   renderMembers();
+  showResumeBox();
+}
+
+/**
+ * Updates the Send / Resend buttons in-place whenever history changes without
+ * disturbing table scroll position or checkboxes.
+ */
+function refreshMemberActionButtons(){
+  const buttons=document.querySelectorAll("[data-manual-send]");
+  if(!buttons.length)return;
+  const sentIdx=getSentIndex();
+  const memberById=new Map(allMembers.map(m=>[m.id,m]));
+  buttons.forEach(btn=>{
+    const m=memberById.get(btn.dataset.manualSend);
+    if(!m)return;
+    const sent=isHistorySentForMember(m, sentIdx);
+    btn.textContent=sent ? "Resend" : "Send";
+    btn.className=sent
+      ? "px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold whitespace-nowrap"
+      : "px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-500 text-xs font-bold whitespace-nowrap";
+  });
 }
 
 function renderMembers(){
   const body=$("memberTable"); body.innerHTML="";
   $("emptyState").classList.toggle("hidden",filteredMembers.length!==0);
+  const sentIdx=getSentIndex();
   filteredMembers.forEach(m=>{
     const checked=selectedIds.has(m.id);
     const status=statusFor(m);
+    const alreadySent=isHistorySentForMember(m, sentIdx);
+    const btnLabel=alreadySent ? "Resend" : "Send";
+    const btnClass=alreadySent
+      ? "px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-bold whitespace-nowrap"
+      : "px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-500 text-xs font-bold whitespace-nowrap";
     const tr=document.createElement("tr");
     tr.className="member-row border-t border-slate-800";
     tr.innerHTML=`
@@ -598,14 +764,19 @@ function renderMembers(){
       <td class="p-3 text-xs">${escapeHtml(m.phoneNumber||"—")}</td>
       <td class="p-3 text-xs">${escapeHtml(m.membershipType||"—")}</td>
       <td class="p-3 text-xs">${formatDate(m.dueDate)}</td>
-      <td class="p-3"><span class="pill ${status==="Overdue"?"bg-red-900 text-red-200":status==="Inactive"?"bg-slate-700 text-slate-300":"bg-green-900 text-green-200"}">${status}</span></td>`;
+      <td class="p-3"><span class="pill ${status==="Overdue"?"bg-red-900 text-red-200":status==="Inactive"?"bg-slate-700 text-slate-300":"bg-green-900 text-green-200"}">${status}</span></td>
+      <td class="p-3"><button type="button" data-manual-send="${escapeHtml(m.id)}" class="${btnClass}">${btnLabel}</button></td>`;
     body.appendChild(tr);
   });
   document.querySelectorAll(".memberCheck").forEach(c=>c.addEventListener("change",e=>{
     const id=e.target.dataset.id;
     if(e.target.checked) selectedIds.add(id); else selectedIds.delete(id);
     updateSelectionText();
+    showResumeBox();
   }));
+  document.querySelectorAll("[data-manual-send]").forEach(btn=>{
+    btn.addEventListener("click",()=>manualSendMember(btn.dataset.manualSend));
+  });
   updateSelectionText();
 }
 
@@ -621,6 +792,7 @@ document.querySelectorAll(".filterBtn").forEach(btn=>btn.addEventListener("click
 $("selectAll").addEventListener("change",e=>{
   filteredMembers.forEach(m=>e.target.checked ? selectedIds.add(m.id) : selectedIds.delete(m.id));
   renderMembers();
+  showResumeBox();
 });
 
 async function loadAppPassword(){
@@ -672,11 +844,11 @@ function updateQueueUI(){
 
 function createCampaign(){
   let selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)));
-  if(!$("includeInactive").checked) selected=selected.filter(m=>statusFor(m)!=="Inactive");
+  if(!shouldIncludeInactive()) selected=selected.filter(m=>statusFor(m)!=="Inactive");
   if(!selected.length){toast("Select at least one member","error");return null;}
   if(!$("message").value.trim()){toast("Write a message first","error");return null;}
   return {id:campaignId(),name:$("campaignName").value.trim()||"WhatsApp Campaign",
-    createdAt:new Date().toISOString(),total:selected.length,skipAlreadySent:$("skipAlreadySent").checked};
+    createdAt:new Date().toISOString(),total:selected.length,skipAlreadySent:shouldSkipAlreadySent()};
 }
 
 
@@ -684,16 +856,17 @@ function createCampaign(){
 let acfQueueWaitingForReturn=false;
 let acfQueueLastAdvanceAt=0;
 
-function openWhatsApp(member, isRetry=false){
+function openWhatsApp(member, isRetry=false, campaignOverride=null){
+  const camp=campaignOverride || currentCampaign;
   const phone=normalizePhone(member.phoneNumber);
   if(!phone){
-    if(!isRetry) createUnsentHistory(member,"Phone number is missing");
+    if(!isRetry) createUnsentHistory(member,"Phone number is missing", camp);
     else toast(`Phone number is missing for ${member.name||"member"}.`,"error");
     return false;
   }
   const msg=replaceVars($("message").value,member);
   if(!msg.trim()){
-    if(!isRetry) createUnsentHistory(member,"Message is empty");
+    if(!isRetry) createUnsentHistory(member,"Message is empty", camp);
     else toast("Message is empty.","error");
     return false;
   }
@@ -701,26 +874,100 @@ function openWhatsApp(member, isRetry=false){
   try{
     const popup=window.open(url,"_blank");
     if(!popup){
-      if(!isRetry) createUnsentHistory(member,"WhatsApp could not be opened (popup blocked)");
+      if(!isRetry) createUnsentHistory(member,"WhatsApp could not be opened (popup blocked)", camp);
       else toast("WhatsApp could not be opened. Allow pop-ups for this app.","error");
       return false;
     }
     addHistory({
       type:"opened",
-      campaignId:currentCampaign?.id,
-      campaignName:currentCampaign?.name,
+      campaignId:camp?.id,
+      campaignName:camp?.name,
       memberId:member.id,
+      memberCode:member.memberId||"",
       memberName:member.name||"Unnamed",
       phoneNumber:member.phoneNumber||"",
-      retryOf:isRetry?retryHistoryId:null
+      retryOf:isRetry?retryHistoryId:null,
+      manual:!!campaignOverride
     });
     return true;
   }catch(e){
     console.warn("WhatsApp launch failed",e);
-    if(!isRetry) createUnsentHistory(member,"WhatsApp launch error");
+    if(!isRetry) createUnsentHistory(member,"WhatsApp launch error", camp);
     else toast("WhatsApp could not be opened.","error");
     return false;
   }
+}
+
+/**
+ * Independent manual Send / Resend for any member row.
+ * Does not touch or alter the Send All queue state.
+ * Missing phone is recorded as Unsent in history.
+ * Successful launch becomes Sent in history after returning from WhatsApp.
+ */
+function manualSendMember(memberId){
+  const member=allMembers.find(m=>m.id===memberId);
+  if(!member){
+    toast("Member is no longer available.","error");
+    return;
+  }
+
+  const manualCampaign={
+    id:`manual_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
+    name:$("campaignName").value.trim() || "Manual Send"
+  };
+
+  // Missing phone -> record as Unsent in history and notify user.
+  const phone=normalizePhone(member.phoneNumber);
+  if(!phone){
+    createUnsentHistory(member,"Phone number is missing", manualCampaign);
+    toast(`Phone number is missing for ${member.name||"member"}. Recorded as Unsent.`,"error");
+    return;
+  }
+
+  const msg=replaceVars($("message").value,member);
+  if(!msg.trim()){
+    toast("Write a message first","error");
+    return;
+  }
+
+  const opened=openWhatsApp(member, false, manualCampaign);
+  if(!opened){
+    toast(`Could not open WhatsApp for ${member.name||"member"}. Recorded as Unsent.`,"error");
+    return;
+  }
+
+  // Record pending manual send so returning from WhatsApp marks it Sent.
+  pendingManualSend={
+    memberId:member.id,
+    memberCode:member.memberId||"",
+    memberName:member.name||"Unnamed",
+    phoneNumber:member.phoneNumber||"",
+    campaignId:manualCampaign.id,
+    campaignName:manualCampaign.name,
+    openedAt:Date.now()
+  };
+
+  toast(`WhatsApp opened for ${member.name||"member"}. Return here after sending to mark as Sent.`,"info");
+}
+
+function finalizePendingManualSend(){
+  if(!pendingManualSend)return false;
+  const item=pendingManualSend;
+  pendingManualSend=null;
+  addHistory({
+    type:"sent",
+    status:"sent",
+    manual:true,
+    campaignId:item.campaignId,
+    campaignName:item.campaignName,
+    memberId:item.memberId,
+    memberCode:item.memberCode,
+    memberName:item.memberName,
+    phoneNumber:item.phoneNumber,
+    sentAt:new Date().toISOString()
+  });
+  toast(`Marked ${item.memberName} as Sent after returning from WhatsApp.`,"success");
+  return true;
 }
 
 function openNextQueueMember(){
@@ -744,6 +991,25 @@ function openNextQueueMember(){
   }
 
   const member=queue[queueIndex];
+
+  // Recheck complete Sent history (by member ID and phone) before opening.
+  if(shouldSkipAlreadySent() && isHistorySentForMember(member)){
+    addHistory({
+      type:"skipped",
+      campaignId:currentCampaign?.id,
+      campaignName:currentCampaign?.name,
+      memberId:member.id,
+      memberCode:member.memberId||"",
+      memberName:member.name||"Unnamed",
+      phoneNumber:member.phoneNumber||"",
+      reason:"Already marked Sent in history"
+    });
+    queueIndex++;
+    saveQueueState();
+    updateQueueUI();
+    setTimeout(openNextQueueMember,50);
+    return;
+  }
 
   // No phone number: record as UNSENT and immediately move to the next member.
   if(!normalizePhone(member.phoneNumber)){
@@ -785,14 +1051,14 @@ function openNextQueueMember(){
 }
 
 function advanceQueueAfterReturn(){
-  if(stopped)return;
-
-  const now=Date.now();
-  if(now-acfQueueLastAdvanceAt<900)return;
-  acfQueueLastAdvanceAt=now;
+  // Independent manual row Send / Resend always finalizes regardless of Send All state.
+  if(pendingManualSend){
+    finalizePendingManualSend();
+    return;
+  }
 
   // A retry from Message History only updates that unsent entry; it does not
-  // alter the main queue position.
+  // alter the main queue position (and works even if Send All was stopped).
   if(retryHistoryId){
     const id=retryHistoryId;
     retryHistoryId=null;
@@ -801,6 +1067,12 @@ function advanceQueueAfterReturn(){
     return;
   }
 
+  if(stopped)return;
+
+  const now=Date.now();
+  if(now-acfQueueLastAdvanceAt<900)return;
+  acfQueueLastAdvanceAt=now;
+
   if(!acfQueueWaitingForReturn)return;
   acfQueueWaitingForReturn=false;
 
@@ -808,11 +1080,14 @@ function advanceQueueAfterReturn(){
     const member=queue[queueIndex];
     addHistory({
       type:"sent",
+      status:"sent",
       campaignId:currentCampaign?.id,
       campaignName:currentCampaign?.name,
       memberId:member.id,
+      memberCode:member.memberId||"",
       memberName:member.name||"Unnamed",
-      phoneNumber:member.phoneNumber||""
+      phoneNumber:member.phoneNumber||"",
+      sentAt:new Date().toISOString()
     });
     queueIndex++;
   }
@@ -840,20 +1115,28 @@ window.addEventListener("pageshow",()=>{
   }
 });
 
+/* Extra desktop/webview return detection strictly for independent manual sends. */
+window.addEventListener("focus",()=>{
+  if(pendingManualSend && Date.now()-pendingManualSend.openedAt>700){
+    finalizePendingManualSend();
+  }
+});
+
 function startQueue(campaign,startIndex=0){
   if(!campaign)return;
   let selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)));
-  if(!$("includeInactive").checked) selected=selected.filter(m=>statusFor(m)!=="Inactive");
+  if(!shouldIncludeInactive()) selected=selected.filter(m=>statusFor(m)!=="Inactive");
 
-  if($("skipAlreadySent").checked){
+  if(shouldSkipAlreadySent()){
     const sent=getSentIndex(),before=selected.length;
-    selected=selected.filter(m=>{
-      const id=String(m.id||m.memberId||"").trim().toLowerCase();
-      const phone=normalizePhone(m.phoneNumber||"");
-      return !(sent.ids.has(id)||(phone&&sent.phones.has(phone)));
-    });
+    selected=selected.filter(m=>!isHistorySentForMember(m, sent));
     const skipped=before-selected.length;
     if(skipped)toast(`Skipped ${skipped} members already marked Sent in history.`,"info");
+  }
+
+  if(!selected.length){
+    toast("All selected members are already marked Sent in history.","info");
+    return;
   }
 
   queue=selected;
@@ -872,16 +1155,46 @@ $("startBtn").addEventListener("click",()=>{
   if(c)startQueue(c,0);
 });
 
+/**
+ * Continue Next Batch rechecks the complete Sent history (by member ID and phone)
+ * before starting the next batch, removing any newly-sent members from the remaining queue.
+ */
 $("continueBtn").addEventListener("click",()=>{
-  if(batchEnd>=queue.length)return;
+  if(queueIndex>=queue.length){
+    $("continueBtn").classList.add("hidden");
+    return;
+  }
 
-  batchEnd=Math.min(
-    batchEnd+(Number($("batchSize").value)||30),
-    queue.length
-  );
+  if(shouldSkipAlreadySent()){
+    const sentIdx=getSentIndex();
+    const completedPart=queue.slice(0, queueIndex);
+    const remainingBefore=queue.slice(queueIndex);
+    const remainingUnsent=remainingBefore.filter(m=>!isHistorySentForMember(m, sentIdx));
+    const skippedNow=remainingBefore.length - remainingUnsent.length;
+
+    queue=[...completedPart, ...remainingUnsent];
+
+    if(skippedNow>0){
+      toast(`Rechecked history: skipped ${skippedNow} member(s) already marked Sent.`,"info");
+    }
+  }
+
+  if(queueIndex>=queue.length){
+    $("continueBtn").classList.add("hidden");
+    saveQueueState();
+    updateQueueUI();
+    $("currentName").textContent="Batch complete";
+    $("currentPhone").textContent="All remaining members are already Sent";
+    toast("All remaining members are already marked Sent in history.","success");
+    return;
+  }
+
+  const bs=Number($("batchSize").value)||30;
+  batchEnd=Math.min(queueIndex + bs, queue.length);
 
   $("continueBtn").classList.add("hidden");
   saveQueueState();
+  updateQueueUI();
   openNextQueueMember();
 });
 
@@ -891,6 +1204,7 @@ $("stopBtn").addEventListener("click",()=>{
   localStorage.removeItem(STORAGE.state);
   $("continueBtn").classList.add("hidden");
   $("queuePanel").classList.add("hidden");
+  showResumeBox();
   toast("WhatsApp sending stopped.","info");
 });
 
@@ -927,32 +1241,57 @@ $("scheduleBtn").addEventListener("click",()=>{
   toast("Campaign scheduled on this device. Keep this page open for it to start.","success");
 });
 
+/**
+ * Resume / Continue Remaining Members:
+ * Always available. Checks the COMPLETE Sent history (by member ID and phone number),
+ * not just the saved queue position, and starts/continues only with remaining unsent members.
+ */
 $("resumeBtn").addEventListener("click",()=>{
-  const s=readJSON(STORAGE.state,null);
-  if(!s)return;
-
-  $("message").value=s.message||"";
-  $("batchSize").value=String(s.batchSize||30);
-  $("delayRange").value=s.delayRange||"8-15";
-  if(typeof s.skipAlreadySent==="boolean")$("skipAlreadySent").checked=s.skipAlreadySent;
-  if(typeof s.includeInactive==="boolean")$("includeInactive").checked=s.includeInactive;
-  selectedIds=new Set(s.selectedIds||[]);
-
-  const ids=new Set(s.queueIds||[]);
-  const selected=allMembers.filter(m=>ids.has(m.id));
-
-  if(!selected.length){
-    toast("Saved members are no longer available.","error");
+  if(!allMembers.length){
+    toast("Members have not loaded yet.","error");
     return;
   }
 
-  queue=selected;
-  currentCampaign=s.campaign;
-  queueIndex=Number(s.queueIndex)||0;
-  batchEnd=Number(s.batchEnd)||Math.min(
-    queueIndex+(Number(s.batchSize)||30),
-    queue.length
-  );
+  const info=buildResumeRemainingPool();
+  const s=info.state;
+
+  // Restore saved campaign composer settings if resuming a saved state.
+  if(s){
+    if(s.message) $("message").value=s.message;
+    if(s.batchSize) $("batchSize").value=String(s.batchSize);
+    if(s.delayRange) $("delayRange").value=s.delayRange;
+    if($("skipAlreadySent") && typeof s.skipAlreadySent==="boolean") $("skipAlreadySent").checked=s.skipAlreadySent;
+    if($("includeInactive") && typeof s.includeInactive==="boolean") $("includeInactive").checked=s.includeInactive;
+    if(Array.isArray(s.selectedIds) && s.selectedIds.length) selectedIds=new Set(s.selectedIds);
+  }
+
+  if(!$("message").value.trim()){
+    toast("Write a message first","error");
+    return;
+  }
+
+  if(!info.remaining.length){
+    toast("All eligible members are already marked Sent in history.","info");
+    showResumeBox();
+    return;
+  }
+
+  if(info.skippedCount>0){
+    toast(`Skipped ${info.skippedCount} previously Sent member(s) from history. Continuing ${info.remaining.length} remaining.`,"info");
+  }
+
+  queue=info.remaining;
+  currentCampaign=(s && s.campaign) ? s.campaign : {
+    id:campaignId(),
+    name:$("campaignName").value.trim() || "Resume Remaining Campaign",
+    createdAt:new Date().toISOString(),
+    total:queue.length,
+    skipAlreadySent:shouldSkipAlreadySent()
+  };
+
+  queueIndex=0;
+  const bs=Number($("batchSize").value)||30;
+  batchEnd=Math.min(bs, queue.length);
 
   stopped=false;
   acfQueueWaitingForReturn=false;
@@ -961,16 +1300,13 @@ $("resumeBtn").addEventListener("click",()=>{
   $("continueBtn").classList.add("hidden");
 
   updateQueueUI();
-
-  // If the page was refreshed after returning from WhatsApp, continue from
-  // the next member. If it was refreshed while WhatsApp was still open,
-  // the saved index remains unchanged and the user can resume.
+  saveQueueState();
   openNextQueueMember();
 });
 
 $("clearResumeBtn").addEventListener("click",()=>{
-  localStorage.removeItem(STORAGE.state);
-  $("resumeBox").classList.add("hidden");
+  clearResume();
+  toast("Saved queue position cleared. Sent history remains intact.","info");
 });
 
 $("exportHistoryBtn").addEventListener("click",exportHistory);
@@ -981,12 +1317,36 @@ $("historyFileInput").addEventListener("change",async e=>{
   try{await importHistoryFile(file);}catch(err){toast(err.message||"Import failed.","error");}
   e.target.value="";
 });
+
+/* Two-step non-blocking confirmation for clearing local message history */
 $("clearHistoryBtn").addEventListener("click",()=>{
-  if(confirm("Clear message history from this device?")){
-    localStorage.removeItem(STORAGE.history);
-    renderHistory();
-    updateAnalytics();
+  const btn=$("clearHistoryBtn");
+  if(!clearHistoryConfirmPending){
+    clearHistoryConfirmPending=true;
+    btn.textContent="Confirm Clear History";
+    btn.classList.remove("bg-slate-700","hover:bg-slate-600");
+    btn.classList.add("bg-red-600","hover:bg-red-500");
+    clearTimeout(clearHistoryConfirmTimer);
+    clearHistoryConfirmTimer=setTimeout(()=>{
+      clearHistoryConfirmPending=false;
+      btn.textContent="Clear History";
+      btn.classList.remove("bg-red-600","hover:bg-red-500");
+      btn.classList.add("bg-slate-700","hover:bg-slate-600");
+    },5000);
+    toast("Click 'Confirm Clear History' again within 5 seconds to clear.","info");
+    return;
   }
+  clearTimeout(clearHistoryConfirmTimer);
+  clearHistoryConfirmPending=false;
+  btn.textContent="Clear History";
+  btn.classList.remove("bg-red-600","hover:bg-red-500");
+  btn.classList.add("bg-slate-700","hover:bg-slate-600");
+  localStorage.removeItem(STORAGE.history);
+  renderHistory();
+  updateAnalytics();
+  refreshMemberActionButtons();
+  showResumeBox();
+  toast("Message history cleared from this device.","success");
 });
 
 (function init(){
@@ -1025,3 +1385,4 @@ window.addEventListener("beforeunload",()=>clearTimeout(timer));
 </script>
 </body>
 </html>
+```
