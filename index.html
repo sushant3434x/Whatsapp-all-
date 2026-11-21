@@ -92,7 +92,7 @@ Available variables:
           Start Message Queue
         </button>
         <p class="text-[11px] text-slate-500 mt-2">
-          The queue opens WhatsApp with a pre-filled message. You still press Send in WhatsApp.
+          The queue opens WhatsApp with a pre-filled message. You still press Send in WhatsApp. Members already recorded as Sent are skipped automatically.
           Delays are pacing controls, not a way to bypass WhatsApp enforcement.
         </p>
       </div>
@@ -181,8 +181,15 @@ Available variables:
 
     <div class="glass rounded-2xl p-5">
       <h2 class="font-black text-lg mb-1">5. Message History</h2>
-      <p class="text-[11px] text-slate-500 mb-3">Unsent members stay here with a <b>Send</b> button so you can retry them later.</p>
-      <div id="historyList" class="space-y-2 max-h-56 overflow-auto"></div>
+      <p class="text-[11px] text-slate-500 mb-3">Unsent members stay here with a <b>Send</b> button. Sent history is used to prevent duplicate sends.</p>
+      <div class="flex flex-wrap gap-2 mb-3">
+        <button id="exportHistoryBtn" class="px-3 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-xs font-bold">Export History</button>
+        <button id="importHistoryBtn" class="px-3 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-xs font-bold">Import History</button>
+        <button id="exportFullBackupBtn" class="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-bold">Export Full Backup</button>
+        <input id="historyFileInput" type="file" accept=".json,application/json" class="hidden">
+      </div>
+      <div id="backupStatus" class="text-[10px] text-slate-500 mb-2"></div>
+      <div id="historyList" class="space-y-2 max-h-72 overflow-auto"></div>
       <button id="clearHistoryBtn" class="mt-3 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-bold">Clear History</button>
     </div>
   </div>
@@ -333,54 +340,142 @@ function readJSON(key,fallback){
 }
 function writeJSON(key,value){localStorage.setItem(key,JSON.stringify(value));}
 
-function getHistory(){return readJSON(STORAGE.history,[]);}
+function getHistory(){
+  const h=readJSON(STORAGE.history,[]);
+  return Array.isArray(h)?h:[];
+}
 function addHistory(event){
   const h=getHistory();
-  h.unshift({...event,at:new Date().toISOString()});
-  writeJSON(STORAGE.history,h.slice(0,500));
+  h.unshift({...event,at:event.at||new Date().toISOString()});
+  writeJSON(STORAGE.history,h.slice(0,5000));
   renderHistory();
   updateAnalytics();
 }
-
+function getSentIndex(){
+  const ids=new Set(),phones=new Set();
+  for(const x of getHistory()){
+    if(x.type!=="sent" || x.status==="unsent") continue;
+    if(x.memberId) ids.add(String(x.memberId).trim().toLowerCase());
+    const p=normalizePhone(x.phoneNumber||"");
+    if(p) phones.add(p);
+  }
+  return {ids,phones};
+}
+function isHistorySentForMember(member){
+  const idx=getSentIndex();
+  const id=String(member?.id||member?.memberId||"").trim().toLowerCase();
+  const phone=normalizePhone(member?.phoneNumber||"");
+  return idx.ids.has(id) || (phone && idx.phones.has(phone));
+}
 function updateAnalytics(){
   const h=getHistory();
   $("aCampaigns").textContent=new Set(h.map(x=>x.campaignId).filter(Boolean)).size;
   $("aOpened").textContent=h.filter(x=>x.type==="opened").length;
-  $("aSent").textContent=h.filter(x=>x.type==="sent").length;
+  $("aSent").textContent=h.filter(x=>x.type==="sent" && x.status!=="unsent").length;
   $("aSkipped").textContent=h.filter(x=>x.type==="skipped").length;
 }
-
 function renderHistory(){
   const el=$("historyList");
-  const h=getHistory().slice(0,30);
+  const h=getHistory();
   el.innerHTML=h.length?h.map(x=>{
     const isUnsent=x.type==="unsent" && x.status!=="sent";
     const label=isUnsent?"⚠ Unsent":x.type==="sent"?"✓ Sent":x.type==="skipped"?"↷ Skipped":"↗ Opened";
     const reason=x.reason?`<div class="text-[10px] text-amber-300 mt-1">${escapeHtml(x.reason)}</div>`:"";
+    const phone=x.phoneNumber?`<div class="text-[10px] text-slate-500 mt-1">${escapeHtml(x.phoneNumber)}</div>`:"";
     const sendBtn=isUnsent?`<button data-retry-history="${escapeHtml(x.historyId||"")}" class="mt-2 px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-500 text-[10px] font-bold">Send</button>`:"";
     return `<div class="rounded-lg bg-slate-900/60 p-2 text-[11px] border ${isUnsent?"border-amber-800":"border-transparent"}">
       <div class="flex justify-between gap-2"><b>${escapeHtml(label)}</b><span class="text-slate-500">${formatDateTime(x.at)}</span></div>
       <div class="text-slate-300 mt-1">${escapeHtml(x.memberName||"Member")} <span class="text-slate-500">• ${escapeHtml(x.campaignName||"Campaign")}</span></div>
-      ${reason}${sendBtn}
+      ${phone}${reason}${sendBtn}
     </div>`;
   }).join(""): `<div class="text-xs text-slate-500">No message history yet.</div>`;
-
   el.querySelectorAll("[data-retry-history]").forEach(btn=>{
     btn.addEventListener("click",()=>retryUnsent(btn.dataset.retryHistory));
   });
 }
-
 function updateHistoryEntry(historyId, patch){
   const h=getHistory();
   const i=h.findIndex(x=>x.historyId===historyId);
   if(i<0)return false;
   h[i]={...h[i],...patch};
-  writeJSON(STORAGE.history,h.slice(0,500));
+  writeJSON(STORAGE.history,h.slice(0,5000));
   renderHistory();
   updateAnalytics();
   return true;
 }
-
+function downloadJSON(filename,data){
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function exportHistory(){
+  const payload={format:"alpha-core-fitness-whatsapp-history",version:2,exportedAt:new Date().toISOString(),history:getHistory()};
+  downloadJSON(`alpha_core_whatsapp_history_${new Date().toISOString().slice(0,10)}.json`,payload);
+  $("backupStatus").textContent=`Exported ${payload.history.length} history records.`;
+  toast(`Exported ${payload.history.length} history records.`,"success");
+}
+function exportFullBackup(){
+  const payload={
+    format:"alpha-core-fitness-whatsapp-full-backup",version:2,exportedAt:new Date().toISOString(),
+    history:getHistory(),draft:readJSON(STORAGE.drafts,null),queueState:readJSON(STORAGE.state,null),
+    scheduledCampaign:readJSON("acf_scheduled_campaign",null)
+  };
+  downloadJSON(`alpha_core_whatsapp_full_backup_${new Date().toISOString().slice(0,10)}.json`,payload);
+  $("backupStatus").textContent=`Full backup exported: ${payload.history.length} history records.`;
+  toast("Full backup exported.","success");
+}
+function normalizeImportedHistory(raw){
+  if(Array.isArray(raw)) return raw;
+  if(Array.isArray(raw?.history)) return raw.history;
+  if(Array.isArray(raw?.messages)) return raw.messages;
+  if(Array.isArray(raw?.records)) return raw.records;
+  if(Array.isArray(raw?.data)) return raw.data;
+  return [];
+}
+function mergeHistory(imported){
+  const current=getHistory();
+  const combined=[...current,...imported],seen=new Set(),out=[];
+  for(const x of combined){
+    if(!x||typeof x!=="object")continue;
+    const fp=JSON.stringify({
+      historyId:x.historyId||"",type:x.type||"",memberId:x.memberId||"",
+      phoneNumber:normalizePhone(x.phoneNumber||x.phone||""),
+      at:x.at||x.timestamp||x.sentAt||"",campaignId:x.campaignId||"",status:x.status||""
+    });
+    if(seen.has(fp))continue;
+    seen.add(fp);
+    out.push({...x,at:x.at||x.timestamp||x.sentAt||new Date().toISOString(),
+      memberName:x.memberName||x.name||"Unnamed",phoneNumber:x.phoneNumber||x.phone||""});
+  }
+  out.sort((a,b)=>new Date(b.at||0)-new Date(a.at||0));
+  writeJSON(STORAGE.history,out.slice(0,5000));
+  return {imported:imported.length,total:out.length,sent:out.filter(x=>x.type==="sent"&&x.status!=="unsent").length};
+}
+async function importHistoryFile(file){
+  const raw=JSON.parse(await file.text());
+  const imported=normalizeImportedHistory(raw);
+  if(!imported.length)throw new Error("No history records were found in this file.");
+  const r=mergeHistory(imported);
+  if(raw?.draft)writeJSON(STORAGE.drafts,raw.draft);
+  if(raw?.scheduledCampaign)writeJSON("acf_scheduled_campaign",raw.scheduledCampaign);
+  $("backupStatus").textContent=`Imported ${r.imported} records • ${r.sent} total Sent records available for skip protection.`;
+  renderHistory();updateAnalytics();showResumeBox();
+  toast(`Imported ${r.imported} history records. ${r.sent} Sent records will be skipped.`,"success");
+}
+function migrateLegacyLocalHistory(){
+  if(getHistory().length)return 0;
+  const keys=["acf_whatsapp_history","acf_whatsapp_history_v1","acf_message_history","whatsapp_history","whatsappMessageHistory","messageHistory"];
+  let imported=[];
+  for(const key of keys){
+    const raw=readJSON(key,null);
+    if(Array.isArray(raw))imported=imported.concat(raw);
+    else if(raw&&Array.isArray(raw.history))imported=imported.concat(raw.history);
+  }
+  if(!imported.length)return 0;
+  return mergeHistory(imported).imported;
+}
 function createUnsentHistory(member, reason){
   const historyId=`${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
   addHistory({
@@ -415,6 +510,8 @@ function saveQueueState(){
   }
   writeJSON(STORAGE.state,{
     campaign:currentCampaign,
+    skipAlreadySent:$("skipAlreadySent").checked,
+    includeInactive:$("includeInactive").checked,
     queueIds:queue.map(m=>m.id),
     queueIndex,
     batchEnd,
@@ -433,7 +530,7 @@ function showResumeBox(){
     box.classList.add("hidden"); return;
   }
   box.classList.remove("hidden");
-  $("resumeText").textContent=`${s.campaign?.name||"Campaign"} — ${s.queueIndex} completed/confirmed, ${s.queueIds.length-s.queueIndex} remaining.`;
+  $("resumeText").textContent=`${s.campaign?.name||"Campaign"} — ${s.queueIndex} position, ${s.queueIds.length-s.queueIndex} remaining. Sent-history protection is applied.`;
 }
 
 function clearResume(){
@@ -574,10 +671,12 @@ function updateQueueUI(){
 }
 
 function createCampaign(){
-  const selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id))).filter(m=>statusFor(m)!=="Inactive");
-  if(!selected.length){toast("Select at least one active/overdue member","error");return null;}
+  let selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)));
+  if(!$("includeInactive").checked) selected=selected.filter(m=>statusFor(m)!=="Inactive");
+  if(!selected.length){toast("Select at least one member","error");return null;}
   if(!$("message").value.trim()){toast("Write a message first","error");return null;}
-  return {id:campaignId(),name:$("campaignName").value.trim()||"WhatsApp Campaign",createdAt:new Date().toISOString(),total:selected.length};
+  return {id:campaignId(),name:$("campaignName").value.trim()||"WhatsApp Campaign",
+    createdAt:new Date().toISOString(),total:selected.length,skipAlreadySent:$("skipAlreadySent").checked};
 }
 
 
@@ -612,6 +711,7 @@ function openWhatsApp(member, isRetry=false){
       campaignName:currentCampaign?.name,
       memberId:member.id,
       memberName:member.name||"Unnamed",
+      phoneNumber:member.phoneNumber||"",
       retryOf:isRetry?retryHistoryId:null
     });
     return true;
@@ -711,7 +811,8 @@ function advanceQueueAfterReturn(){
       campaignId:currentCampaign?.id,
       campaignName:currentCampaign?.name,
       memberId:member.id,
-      memberName:member.name||"Unnamed"
+      memberName:member.name||"Unnamed",
+      phoneNumber:member.phoneNumber||""
     });
     queueIndex++;
   }
@@ -741,26 +842,29 @@ window.addEventListener("pageshow",()=>{
 
 function startQueue(campaign,startIndex=0){
   if(!campaign)return;
+  let selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)));
+  if(!$("includeInactive").checked) selected=selected.filter(m=>statusFor(m)!=="Inactive");
 
-  const selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)))
-    .filter(m=>statusFor(m)!=="Inactive");
+  if($("skipAlreadySent").checked){
+    const sent=getSentIndex(),before=selected.length;
+    selected=selected.filter(m=>{
+      const id=String(m.id||m.memberId||"").trim().toLowerCase();
+      const phone=normalizePhone(m.phoneNumber||"");
+      return !(sent.ids.has(id)||(phone&&sent.phones.has(phone)));
+    });
+    const skipped=before-selected.length;
+    if(skipped)toast(`Skipped ${skipped} members already marked Sent in history.`,"info");
+  }
 
   queue=selected;
   currentCampaign=campaign;
-  queueIndex=startIndex;
+  queueIndex=Math.min(Number(startIndex)||0,queue.length);
   const bs=Number($("batchSize").value)||30;
-  batchEnd=Math.min(Math.floor(startIndex/bs)*bs+bs,queue.length);
-  stopped=false;
-  acfQueueWaitingForReturn=false;
-
+  batchEnd=Math.min(Math.floor(queueIndex/bs)*bs+bs,queue.length);
+  stopped=false;acfQueueWaitingForReturn=false;
   $("queuePanel").classList.remove("hidden");
   $("continueBtn").classList.add("hidden");
-
-  updateQueueUI();
-  saveQueueState();
-
-  // The first WhatsApp launch is directly triggered by the user's Send All click.
-  openNextQueueMember();
+  updateQueueUI();saveQueueState();openNextQueueMember();
 }
 
 $("startBtn").addEventListener("click",()=>{
@@ -830,6 +934,8 @@ $("resumeBtn").addEventListener("click",()=>{
   $("message").value=s.message||"";
   $("batchSize").value=String(s.batchSize||30);
   $("delayRange").value=s.delayRange||"8-15";
+  if(typeof s.skipAlreadySent==="boolean")$("skipAlreadySent").checked=s.skipAlreadySent;
+  if(typeof s.includeInactive==="boolean")$("includeInactive").checked=s.includeInactive;
   selectedIds=new Set(s.selectedIds||[]);
 
   const ids=new Set(s.queueIds||[]);
@@ -867,6 +973,14 @@ $("clearResumeBtn").addEventListener("click",()=>{
   $("resumeBox").classList.add("hidden");
 });
 
+$("exportHistoryBtn").addEventListener("click",exportHistory);
+$("exportFullBackupBtn").addEventListener("click",exportFullBackup);
+$("importHistoryBtn").addEventListener("click",()=>$("historyFileInput").click());
+$("historyFileInput").addEventListener("change",async e=>{
+  const file=e.target.files?.[0]; if(!file)return;
+  try{await importHistoryFile(file);}catch(err){toast(err.message||"Import failed.","error");}
+  e.target.value="";
+});
 $("clearHistoryBtn").addEventListener("click",()=>{
   if(confirm("Clear message history from this device?")){
     localStorage.removeItem(STORAGE.history);
@@ -876,6 +990,10 @@ $("clearHistoryBtn").addEventListener("click",()=>{
 });
 
 (function init(){
+  try{
+    const migrated=migrateLegacyLocalHistory();
+    if(migrated)$("backupStatus").textContent=`Recovered ${migrated} legacy history records from this WebView.`;
+  }catch(e){console.warn("Legacy history migration failed",e);}
   const draft=readJSON(STORAGE.drafts,null);
   if(draft){
     $("campaignName").value=draft.name||"";
@@ -883,6 +1001,7 @@ $("clearHistoryBtn").addEventListener("click",()=>{
     $("batchSize").value=String(draft.batchSize||30);
     $("delayRange").value=draft.delayRange||"8-15";
   }
+  if(!$("message").value.trim())$("message").value="*ALPHA CORE FITNESS*\nHi, here is your gift 🎁";
   renderHistory();updateAnalytics();showResumeBox();
 
   // Device-local scheduled campaign runner.
