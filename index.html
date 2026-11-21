@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alpha Core Fitness — WhatsApp Message Center</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body{font-family:Inter,system-ui,sans-serif;background:radial-gradient(circle at top,#172554,#020617 55%);min-height:100vh}
+  .glass{background:rgba(15,23,42,.78);backdrop-filter:blur(18px);border:1px solid rgba(148,163,184,.2);box-shadow:0 20px 60px rgba(0,0,0,.25)}
+  .field{background:rgba(30,41,59,.85);border:1px solid rgba(148,163,184,.3)}
+  .field:focus{outline:none;border-color:#818cf8;box-shadow:0 0 0 3px rgba(99,102,241,.15)}
+  .member-row{transition:.15s}.member-row:hover{background:rgba(99,102,241,.08)}
+  .pill{font-size:11px;padding:3px 8px;border-radius:999px;font-weight:700}
+  .progress{height:9px;border-radius:999px;background:#1e293b;overflow:hidden}
+  .progress>div{height:100%;background:linear-gradient(90deg,#6366f1,#22c55e);transition:width .25s}
+  .toast{animation:toast .2s ease-out}@keyframes toast{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+  button:disabled{opacity:.45;cursor:not-allowed}
+</style>
+</head>
+<body class="text-slate-100 p-4 md:p-8">
+
+<div id="toast" class="fixed top-4 right-4 z-50 hidden max-w-sm px-4 py-3 rounded-xl glass text-sm"></div>
+
+<!-- LOGIN -->
+<section id="loginView" class="min-h-[90vh] flex items-center justify-center">
+  <div class="glass rounded-3xl p-7 w-full max-w-md">
+    <div class="text-center mb-7">
+      <div class="text-4xl mb-2">💪</div>
+      <h1 class="text-2xl font-black">ALPHA CORE FITNESS</h1>
+      <p class="text-slate-400 mt-1">WhatsApp Message Center</p>
+    </div>
+    <button id="googleLogin" class="w-full py-3 rounded-xl bg-white text-slate-900 font-bold hover:bg-slate-100">
+      Login with Google
+    </button>
+    <div id="passwordBox" class="hidden mt-5">
+      <label class="text-sm text-slate-300">App Password</label>
+      <input id="appPassword" type="password" maxlength="8" class="field w-full mt-2 p-3 rounded-xl text-center">
+      <button id="unlockBtn" class="w-full mt-3 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 font-bold">Unlock</button>
+    </div>
+    <p id="loginStatus" class="text-xs text-slate-500 mt-5 text-center">Sign in with the same Google account used by your gym app.</p>
+  </div>
+</section>
+
+<!-- APP -->
+<section id="appView" class="hidden max-w-7xl mx-auto">
+  <header class="glass rounded-2xl p-4 md:p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-5">
+    <div>
+      <h1 class="text-xl md:text-2xl font-black">WhatsApp Message Center</h1>
+      <p class="text-xs text-slate-400">Manual WhatsApp handoff + controlled batches</p>
+    </div>
+    <div class="flex gap-2">
+      <span id="memberCount" class="pill bg-slate-700 text-slate-200">0 members</span>
+      <button id="logoutBtn" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 text-sm font-bold">Sign Out</button>
+    </div>
+  </header>
+
+  <div class="grid lg:grid-cols-3 gap-5">
+    <!-- COMPOSER -->
+    <div class="lg:col-span-1 space-y-5">
+      <div class="glass rounded-2xl p-5">
+        <h2 class="font-black text-lg mb-4">1. Compose Message</h2>
+        <textarea id="message" rows="11" class="field w-full rounded-xl p-3 text-sm" placeholder="Write your message here...
+
+Available variables:
+{{name}}
+{{memberId}}
+{{phone}}
+{{membershipType}}
+{{dueDate}}
+{{feeAmount}}"></textarea>
+        <div class="text-xs text-slate-500 mt-2">Variables are replaced separately for every member.</div>
+
+        <div class="grid grid-cols-2 gap-3 mt-4">
+          <div>
+            <label class="text-xs text-slate-400">Batch size</label>
+            <select id="batchSize" class="field w-full p-2.5 rounded-lg mt-1">
+              <option>25</option><option selected>30</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-slate-400">Delay between opens</label>
+            <select id="delayRange" class="field w-full p-2.5 rounded-lg mt-1">
+              <option value="5-10">5–10 sec</option>
+              <option value="8-15" selected>8–15 sec</option>
+              <option value="15-30">15–30 sec</option>
+            </select>
+          </div>
+        </div>
+
+        <button id="startBtn" class="w-full mt-4 py-3 rounded-xl bg-green-600 hover:bg-green-500 font-black">
+          Start Message Queue
+        </button>
+        <p class="text-[11px] text-slate-500 mt-2">
+          The queue opens WhatsApp with a pre-filled message. You still press Send in WhatsApp.
+          Delays are pacing controls, not a way to bypass WhatsApp enforcement.
+        </p>
+      </div>
+
+      <div class="glass rounded-2xl p-5">
+        <h2 class="font-black text-lg mb-4">2. Member Selection</h2>
+        <input id="search" class="field w-full p-3 rounded-xl text-sm" placeholder="Search name, ID or phone">
+        <div class="flex gap-2 mt-3">
+          <button data-filter="all" class="filterBtn flex-1 py-2 rounded-lg bg-indigo-600 text-xs font-bold">All</button>
+          <button data-filter="active" class="filterBtn flex-1 py-2 rounded-lg bg-slate-700 text-xs font-bold">Active</button>
+          <button data-filter="overdue" class="filterBtn flex-1 py-2 rounded-lg bg-slate-700 text-xs font-bold">Overdue</button>
+        </div>
+        <label class="flex items-center gap-2 text-xs text-slate-400 mt-3">
+          <input id="selectAll" type="checkbox"> Select all filtered members
+        </label>
+      </div>
+    </div>
+
+    <!-- MEMBERS -->
+    <div class="lg:col-span-2">
+      <div class="glass rounded-2xl p-5">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-4">
+          <div>
+            <h2 class="font-black text-lg">Members</h2>
+            <p id="selectionText" class="text-xs text-slate-400">0 selected</p>
+          </div>
+          <div id="batchInfo" class="text-xs text-slate-400"></div>
+        </div>
+        <div class="overflow-auto max-h-[620px] rounded-xl border border-slate-700">
+          <table class="w-full text-sm">
+            <thead class="sticky top-0 bg-slate-900">
+              <tr>
+                <th class="p-3 text-left">✓</th>
+                <th class="p-3 text-left">Member</th>
+                <th class="p-3 text-left">Phone</th>
+                <th class="p-3 text-left">Plan</th>
+                <th class="p-3 text-left">Due</th>
+                <th class="p-3 text-left">Status</th>
+              </tr>
+            </thead>
+            <tbody id="memberTable"></tbody>
+          </table>
+          <div id="emptyState" class="hidden p-10 text-center text-slate-500">No members found.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- CAMPAIGN TOOLS -->
+  <div class="grid lg:grid-cols-3 gap-5 mt-5">
+    <div class="glass rounded-2xl p-5">
+      <h2 class="font-black text-lg mb-4">3. Campaign & Resume</h2>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="text-xs text-slate-400">Campaign name</label>
+          <input id="campaignName" class="field w-full p-2.5 rounded-lg mt-1" placeholder="e.g. Fee Reminder">
+        </div>
+        <div>
+          <label class="text-xs text-slate-400">Schedule</label>
+          <input id="scheduleAt" type="datetime-local" class="field w-full p-2.5 rounded-lg mt-1">
+        </div>
+      </div>
+      <div class="flex gap-2 mt-3">
+        <button id="saveCampaignBtn" class="flex-1 py-2.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm font-bold">Save Draft</button>
+        <button id="scheduleBtn" class="flex-1 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-sm font-bold">Schedule</button>
+      </div>
+      <div id="resumeBox" class="hidden mt-3 p-3 rounded-xl bg-amber-950/30 border border-amber-800 text-xs">
+        <div class="font-bold text-amber-200">Resume available</div>
+        <div id="resumeText" class="text-slate-300 mt-1"></div>
+        <button id="resumeBtn" class="mt-2 px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 font-bold">Resume</button>
+        <button id="clearResumeBtn" class="mt-2 ml-1 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 font-bold">Clear</button>
+      </div>
+    </div>
+
+    <div class="glass rounded-2xl p-5">
+      <h2 class="font-black text-lg mb-4">4. Analytics</h2>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="bg-slate-900/60 rounded-xl p-3"><div class="text-xs text-slate-500">Campaigns</div><div id="aCampaigns" class="text-2xl font-black">0</div></div>
+        <div class="bg-slate-900/60 rounded-xl p-3"><div class="text-xs text-slate-500">Opened</div><div id="aOpened" class="text-2xl font-black">0</div></div>
+        <div class="bg-slate-900/60 rounded-xl p-3"><div class="text-xs text-slate-500">Confirmed sent</div><div id="aSent" class="text-2xl font-black">0</div></div>
+        <div class="bg-slate-900/60 rounded-xl p-3"><div class="text-xs text-slate-500">Skipped</div><div id="aSkipped" class="text-2xl font-black">0</div></div>
+      </div>
+      <p class="text-[11px] text-slate-500 mt-3">“Opened” means WhatsApp was launched. “Confirmed sent” is counted only when you press Sent & Next.</p>
+    </div>
+
+    <div class="glass rounded-2xl p-5">
+      <h2 class="font-black text-lg mb-4">5. Message History</h2>
+      <div id="historyList" class="space-y-2 max-h-40 overflow-auto"></div>
+      <button id="clearHistoryBtn" class="mt-3 px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-bold">Clear History</button>
+    </div>
+  </div>
+
+  <!-- QUEUE PANEL -->
+  <div id="queuePanel" class="hidden mt-5 glass rounded-2xl p-5">
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+      <div>
+        <div class="text-xs uppercase tracking-widest text-indigo-300 font-black">Current Queue</div>
+        <div id="currentName" class="text-xl font-black mt-1">—</div>
+        <div id="currentPhone" class="text-xs text-slate-400">—</div>
+      </div>
+      <div class="flex gap-2 flex-wrap">
+        <button id="stopBtn" class="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-500 font-bold text-sm">Stop</button>
+        <button id="continueBtn" class="hidden px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 font-bold text-sm">Continue Next Batch</button>
+      </div>
+    </div>
+
+    <div class="progress mt-4"><div id="progressBar" style="width:0%"></div></div>
+    <div class="flex justify-between text-xs text-slate-400 mt-2">
+      <span id="progressText">0 / 0</span>
+      <span id="leftText">0 left</span>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-3 mt-4">
+      <div class="bg-slate-900/60 rounded-xl p-3"><div class="text-xs text-slate-500">Sent/handled</div><div id="sentCount" class="text-xl font-black">0</div></div>
+      <div class="bg-slate-900/60 rounded-xl p-3"><div class="text-xs text-slate-500">Current batch</div><div id="batchProgress" class="text-xl font-black">0 / 0</div></div>
+      <div class="bg-slate-900/60 rounded-xl p-3"><div class="text-xs text-slate-500">Remaining</div><div id="remainingCount" class="text-xl font-black">0</div></div>
+    </div>
+
+    <div class="mt-4 bg-indigo-950/40 border border-indigo-900 rounded-xl p-3 text-xs text-slate-300">
+      <b>Workflow:</b> Press <b>Send All</b> once → WhatsApp opens for the first member → press Send → return to this page.
+      The next member opens automatically, matching the original Send All flow from your gym app. After the selected batch is complete, press <b>Continue Next Batch</b>.
+      Queue progress is saved so a refresh can resume the campaign.
+    </div>
+  </div>
+</section>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+import {
+  getAuth, onAuthStateChanged, signInWithPopup, signOut, GoogleAuthProvider
+} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+import {
+  getFirestore, collection, getDocs, getDoc, doc
+} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA1cOHWVufQV6ruZv3LmgdqfRNPGjyzsEI",
+  authDomain: "alpha-core-fitness-data.firebaseapp.com",
+  projectId: "alpha-core-fitness-data",
+  storageBucket: "alpha-core-fitness-data.firebasestorage.app",
+  messagingSenderId: "311733734225",
+  appId: "1:311733734225:web:697ef2dc197ebb2e662170",
+  measurementId: "G-C5EKPN2K2J"
+};
+
+const APP_ID = "default-app-id";
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+const provider = new GoogleAuthProvider();
+
+const STORAGE = {
+  state: "acf_whatsapp_queue_state_v2",
+  history: "acf_whatsapp_history_v2",
+  drafts: "acf_whatsapp_drafts_v2"
+};
+
+let allMembers = [];
+let filteredMembers = [];
+let selectedIds = new Set();
+let filterMode = "all";
+let queue = [];
+let queueIndex = 0;
+let batchEnd = 0;
+let stopped = false;
+let timer = null;
+let unlocked = false;
+let currentCampaign = null;
+let currentOpened = false;
+
+const $ = id => document.getElementById(id);
+
+function toast(msg, type="info"){
+  const t=$("toast");
+  t.textContent=msg;
+  t.className="fixed top-4 right-4 z-50 max-w-sm px-4 py-3 rounded-xl glass text-sm toast";
+  if(type==="error") t.classList.add("border-red-500");
+  if(type==="success") t.classList.add("border-green-500");
+  clearTimeout(window.__toastTimer);
+  window.__toastTimer=setTimeout(()=>t.classList.add("hidden"),3500);
+}
+
+function normalizePhone(v){
+  let p=String(v||"").replace(/\D/g,"");
+  if(p.length===10) p="91"+p;
+  return p;
+}
+
+function formatDate(v){
+  if(!v) return "—";
+  const d=new Date(v);
+  if(Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleDateString("en-IN",{day:"2-digit",month:"2-digit",year:"numeric"});
+}
+
+function formatDateTime(v){
+  if(!v) return "—";
+  const d=new Date(v);
+  if(Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleString("en-IN",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"});
+}
+
+function isOverdue(m){
+  if(!m.dueDate) return false;
+  const d=new Date(m.dueDate); d.setHours(0,0,0,0);
+  const t=new Date(); t.setHours(0,0,0,0);
+  return d<t && m.isInactive!==true && m.status!=="Inactive";
+}
+
+function statusFor(m){
+  if(m.isInactive===true || m.status==="Inactive") return "Inactive";
+  return isOverdue(m) ? "Overdue" : "Active";
+}
+
+function replaceVars(template,m){
+  const map={
+    name:m.name||"",
+    memberId:m.memberId||m.id||"",
+    phone:m.phoneNumber||"",
+    membershipType:m.membershipType||"",
+    dueDate:formatDate(m.dueDate),
+    feeAmount:m.feeAmount ?? ""
+  };
+  return String(template||"").replace(/\{\{\s*(name|memberId|phone|membershipType|dueDate|feeAmount)\s*\}\}/gi,
+    (_,k)=>map[k.toLowerCase()] ?? "");
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function readJSON(key,fallback){
+  try{return JSON.parse(localStorage.getItem(key)||JSON.stringify(fallback));}
+  catch{return fallback;}
+}
+function writeJSON(key,value){localStorage.setItem(key,JSON.stringify(value));}
+
+function getHistory(){return readJSON(STORAGE.history,[]);}
+function addHistory(event){
+  const h=getHistory();
+  h.unshift({...event,at:new Date().toISOString()});
+  writeJSON(STORAGE.history,h.slice(0,500));
+  renderHistory();
+  updateAnalytics();
+}
+
+function updateAnalytics(){
+  const h=getHistory();
+  $("aCampaigns").textContent=new Set(h.map(x=>x.campaignId).filter(Boolean)).size;
+  $("aOpened").textContent=h.filter(x=>x.type==="opened").length;
+  $("aSent").textContent=h.filter(x=>x.type==="sent").length;
+  $("aSkipped").textContent=h.filter(x=>x.type==="skipped").length;
+}
+
+function renderHistory(){
+  const el=$("historyList");
+  const h=getHistory().slice(0,12);
+  el.innerHTML=h.length?h.map(x=>{
+    const label=x.type==="sent"?"✓ Sent":x.type==="skipped"?"↷ Skipped":"↗ Opened";
+    return `<div class="rounded-lg bg-slate-900/60 p-2 text-[11px]">
+      <div class="flex justify-between gap-2"><b>${escapeHtml(label)}</b><span class="text-slate-500">${formatDateTime(x.at)}</span></div>
+      <div class="text-slate-300 mt-1">${escapeHtml(x.memberName||"Member")} <span class="text-slate-500">• ${escapeHtml(x.campaignName||"Campaign")}</span></div>
+    </div>`;
+  }).join(""):`<div class="text-xs text-slate-500">No message history yet.</div>`;
+}
+
+function saveQueueState(){
+  if(!currentCampaign || queueIndex>=queue.length){
+    localStorage.removeItem(STORAGE.state);
+    return;
+  }
+  writeJSON(STORAGE.state,{
+    campaign:currentCampaign,
+    queueIds:queue.map(m=>m.id),
+    queueIndex,
+    batchEnd,
+    selectedIds:[...selectedIds],
+    message:$("message").value,
+    batchSize:Number($("batchSize").value)||30,
+    delayRange:$("delayRange").value
+  });
+  showResumeBox();
+}
+
+function showResumeBox(){
+  const s=readJSON(STORAGE.state,null);
+  const box=$("resumeBox");
+  if(!s || !s.queueIds?.length || s.queueIndex>=s.queueIds.length){
+    box.classList.add("hidden"); return;
+  }
+  box.classList.remove("hidden");
+  $("resumeText").textContent=`${s.campaign?.name||"Campaign"} — ${s.queueIndex} completed/confirmed, ${s.queueIds.length-s.queueIndex} remaining.`;
+}
+
+function clearResume(){
+  localStorage.removeItem(STORAGE.state);
+  $("resumeBox").classList.add("hidden");
+}
+
+function campaignId(){
+  return "camp_"+Date.now()+"_"+Math.random().toString(36).slice(2,8);
+}
+
+function dedupeMembers(list){
+  const seen=new Set(), out=[];
+  for(const m of list){
+    const key=[
+      String(m.name||"").trim().toLowerCase(),
+      String(m.memberId||m.id||"").trim().toLowerCase(),
+      normalizePhone(m.phoneNumber||"")
+    ].join("|");
+    if(seen.has(key)) continue;
+    seen.add(key); out.push(m);
+  }
+  return out;
+}
+
+async function loadMembers(){
+  try{
+    const ref=collection(db,`artifacts/${APP_ID}/public/data/gymMembers`);
+    const snap=await getDocs(ref);
+    const raw=snap.docs.map(d=>({id:d.id,...d.data()}));
+    const before=raw.length;
+    allMembers=dedupeMembers(raw);
+    $("memberCount").textContent=`${allMembers.length} members${before!==allMembers.length?` • ${before-allMembers.length} duplicate records hidden`:""}`;
+    applyFilters();
+    toast(`Loaded ${allMembers.length} unique members`,"success");
+    showResumeBox();
+  }catch(e){
+    console.error(e);
+    toast("Could not load members. Check Firestore rules/path.","error");
+  }
+}
+
+function applyFilters(){
+  const q=$("search").value.trim().toLowerCase();
+  filteredMembers=allMembers.filter(m=>{
+    const status=statusFor(m);
+    const modeOK=filterMode==="all" || (filterMode==="active" && status==="Active") || (filterMode==="overdue" && status==="Overdue");
+    const text=`${m.name||""} ${m.memberId||""} ${m.phoneNumber||""}`.toLowerCase();
+    return modeOK && text.includes(q);
+  });
+  renderMembers();
+}
+
+function renderMembers(){
+  const body=$("memberTable"); body.innerHTML="";
+  $("emptyState").classList.toggle("hidden",filteredMembers.length!==0);
+  filteredMembers.forEach(m=>{
+    const checked=selectedIds.has(m.id);
+    const status=statusFor(m);
+    const tr=document.createElement("tr");
+    tr.className="member-row border-t border-slate-800";
+    tr.innerHTML=`
+      <td class="p-3"><input type="checkbox" class="memberCheck" data-id="${escapeHtml(m.id)}" ${checked?"checked":""}></td>
+      <td class="p-3"><div class="font-bold">${escapeHtml(m.name||"Unnamed")}</div><div class="text-[11px] text-slate-500">${escapeHtml(m.memberId||m.id)}</div></td>
+      <td class="p-3 text-xs">${escapeHtml(m.phoneNumber||"—")}</td>
+      <td class="p-3 text-xs">${escapeHtml(m.membershipType||"—")}</td>
+      <td class="p-3 text-xs">${formatDate(m.dueDate)}</td>
+      <td class="p-3"><span class="pill ${status==="Overdue"?"bg-red-900 text-red-200":status==="Inactive"?"bg-slate-700 text-slate-300":"bg-green-900 text-green-200"}">${status}</span></td>`;
+    body.appendChild(tr);
+  });
+  document.querySelectorAll(".memberCheck").forEach(c=>c.addEventListener("change",e=>{
+    const id=e.target.dataset.id;
+    if(e.target.checked) selectedIds.add(id); else selectedIds.delete(id);
+    updateSelectionText();
+  }));
+  updateSelectionText();
+}
+
+function updateSelectionText(){ $("selectionText").textContent=`${selectedIds.size} selected`; }
+
+$("search").addEventListener("input",applyFilters);
+document.querySelectorAll(".filterBtn").forEach(btn=>btn.addEventListener("click",()=>{
+  filterMode=btn.dataset.filter;
+  document.querySelectorAll(".filterBtn").forEach(b=>b.classList.replace("bg-indigo-600","bg-slate-700"));
+  btn.classList.replace("bg-slate-700","bg-indigo-600");
+  applyFilters();
+}));
+$("selectAll").addEventListener("change",e=>{
+  filteredMembers.forEach(m=>e.target.checked ? selectedIds.add(m.id) : selectedIds.delete(m.id));
+  renderMembers();
+});
+
+async function loadAppPassword(){
+  try{
+    const s=await getDoc(doc(db,"settings","security"));
+    window.APP_PASSWORD=s.exists()&&s.data().appPassword?String(s.data().appPassword):"";
+  }catch(e){console.warn("Security settings unavailable",e);window.APP_PASSWORD="";}
+}
+
+$("googleLogin").addEventListener("click",async()=>{
+  try{await signInWithPopup(auth,provider);}
+  catch(e){toast(e.message||"Google login failed","error");}
+});
+$("unlockBtn").addEventListener("click",()=>{
+  const entered=$("appPassword").value;
+  if(window.APP_PASSWORD && entered===window.APP_PASSWORD || !window.APP_PASSWORD && entered===""){
+    unlocked=true;$("loginView").classList.add("hidden");$("appView").classList.remove("hidden");loadMembers();
+  }else toast("Incorrect app password","error");
+});
+onAuthStateChanged(auth,async user=>{
+  if(!user){
+    $("loginView").classList.remove("hidden");$("appView").classList.add("hidden");$("passwordBox").classList.add("hidden");unlocked=false;return;
+  }
+  $("passwordBox").classList.remove("hidden");
+  $("loginStatus").textContent=`Signed in as ${user.email||user.displayName||"Google user"}. Enter the app password.`;
+  await loadAppPassword();
+});
+$("logoutBtn").addEventListener("click",()=>signOut(auth));
+
+function randomDelay(){
+  const [a,b]=$("delayRange").value.split("-").map(Number);
+  return Math.floor((Math.random()*(b-a+1)+a)*1000);
+}
+
+function updateQueueUI(){
+  const total=queue.length, handled=queueIndex, current=queue[queueIndex];
+  $("progressText").textContent=`${Math.min(handled,total)} / ${total}`;
+  $("leftText").textContent=`${Math.max(total-handled,0)} left`;
+  $("sentCount").textContent=handled;
+  $("remainingCount").textContent=Math.max(total-handled,0);
+  $("progressBar").style.width=(total?Math.min(100,handled/total*100):0)+"%";
+  $("currentName").textContent=current?(current.name||"Unnamed"):"Batch complete";
+  $("currentPhone").textContent=current?(current.phoneNumber||"No phone"):"";
+  const bs=Number($("batchSize").value)||30;
+  const batchStart=Math.floor(handled/bs)*bs;
+  $("batchProgress").textContent=`${Math.max(0,handled-batchStart)} / ${Math.min(bs,total-batchStart)}`;
+  $("batchInfo").textContent=total?`Batch ${Math.min(Math.floor(handled/bs)+1,Math.ceil(total/bs))} of ${Math.ceil(total/bs)}`:"";
+}
+
+function createCampaign(){
+  const selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id))).filter(m=>statusFor(m)!=="Inactive");
+  if(!selected.length){toast("Select at least one active/overdue member","error");return null;}
+  if(!$("message").value.trim()){toast("Write a message first","error");return null;}
+  return {id:campaignId(),name:$("campaignName").value.trim()||"WhatsApp Campaign",createdAt:new Date().toISOString(),total:selected.length};
+}
+
+
+
+let acfQueueWaitingForReturn=false;
+let acfQueueLastAdvanceAt=0;
+
+function openWhatsApp(member){
+  const phone=normalizePhone(member.phoneNumber);
+  if(!phone){toast(`Phone number missing for ${member.name||"member"}`,"error");return false;}
+  const msg=replaceVars($("message").value,member);
+  if(!msg.trim()){toast("Message is empty","error");return false;}
+  const url=`https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
+  try{
+    const popup=window.open(url,"_blank");
+    if(!popup){
+      toast("WhatsApp could not be opened. Allow pop-ups for this app.","error");
+      return false;
+    }
+    addHistory({
+      type:"opened",
+      campaignId:currentCampaign?.id,
+      campaignName:currentCampaign?.name,
+      memberId:member.id,
+      memberName:member.name||"Unnamed"
+    });
+    return true;
+  }catch(e){
+    console.warn("WhatsApp launch failed",e);
+    toast("WhatsApp could not be opened.","error");
+    return false;
+  }
+}
+
+function openNextQueueMember(){
+  if(stopped)return;
+
+  if(queueIndex>=batchEnd){
+    acfQueueWaitingForReturn=false;
+    saveQueueState();
+    $("currentName").textContent="Batch complete";
+    $("currentPhone").textContent=`${batchEnd} members processed`;
+    $("continueBtn").classList.toggle("hidden",batchEnd>=queue.length);
+    updateQueueUI();
+
+    if(batchEnd>=queue.length){
+      $("queuePanel").classList.remove("hidden");
+      toast("All selected members completed.","success");
+    }else{
+      toast("Batch complete. Press Continue Next Batch.","success");
+    }
+    return;
+  }
+
+  const member=queue[queueIndex];
+  acfQueueWaitingForReturn=true;
+  saveQueueState();
+  updateQueueUI();
+
+  const opened=openWhatsApp(member);
+  if(!opened){
+    acfQueueWaitingForReturn=false;
+    saveQueueState();
+    return;
+  }
+
+  /*
+   * IMPORTANT:
+   * This intentionally mirrors the original gym app's Send All behavior:
+   * WhatsApp is opened for one member, and when the user returns to this
+   * page, the queue advances automatically to the next member.
+   */
+}
+
+function advanceQueueAfterReturn(){
+  if(stopped || !acfQueueWaitingForReturn)return;
+
+  const now=Date.now();
+  if(now-acfQueueLastAdvanceAt<900)return;
+  acfQueueLastAdvanceAt=now;
+
+  acfQueueWaitingForReturn=false;
+
+  if(queueIndex<queue.length){
+    const member=queue[queueIndex];
+    addHistory({
+      type:"sent",
+      campaignId:currentCampaign?.id,
+      campaignName:currentCampaign?.name,
+      memberId:member.id,
+      memberName:member.name||"Unnamed"
+    });
+    queueIndex++;
+  }
+
+  saveQueueState();
+  updateQueueUI();
+
+  if(queueIndex>=batchEnd){
+    openNextQueueMember();
+  }else{
+    setTimeout(openNextQueueMember,450);
+  }
+}
+
+/* Same return-to-page behavior as the original Send All feature. */
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="visible"){
+    advanceQueueAfterReturn();
+  }
+});
+
+window.addEventListener("pageshow",()=>{
+  if(document.visibilityState==="visible"){
+    advanceQueueAfterReturn();
+  }
+});
+
+function startQueue(campaign,startIndex=0){
+  if(!campaign)return;
+
+  const selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)))
+    .filter(m=>statusFor(m)!=="Inactive");
+
+  queue=selected;
+  currentCampaign=campaign;
+  queueIndex=startIndex;
+  const bs=Number($("batchSize").value)||30;
+  batchEnd=Math.min(Math.floor(startIndex/bs)*bs+bs,queue.length);
+  stopped=false;
+  acfQueueWaitingForReturn=false;
+
+  $("queuePanel").classList.remove("hidden");
+  $("continueBtn").classList.add("hidden");
+
+  updateQueueUI();
+  saveQueueState();
+
+  // The first WhatsApp launch is directly triggered by the user's Send All click.
+  openNextQueueMember();
+}
+
+$("startBtn").addEventListener("click",()=>{
+  const c=createCampaign();
+  if(c)startQueue(c,0);
+});
+
+$("continueBtn").addEventListener("click",()=>{
+  if(batchEnd>=queue.length)return;
+
+  batchEnd=Math.min(
+    batchEnd+(Number($("batchSize").value)||30),
+    queue.length
+  );
+
+  $("continueBtn").classList.add("hidden");
+  saveQueueState();
+  openNextQueueMember();
+});
+
+$("stopBtn").addEventListener("click",()=>{
+  stopped=true;
+  acfQueueWaitingForReturn=false;
+  localStorage.removeItem(STORAGE.state);
+  $("continueBtn").classList.add("hidden");
+  $("queuePanel").classList.add("hidden");
+  toast("WhatsApp sending stopped.","info");
+});
+
+$("saveCampaignBtn").addEventListener("click",()=>{
+  const draft={
+    name:$("campaignName").value.trim(),
+    message:$("message").value,
+    batchSize:$("batchSize").value,
+    delayRange:$("delayRange").value,
+    createdAt:new Date().toISOString()
+  };
+  writeJSON(STORAGE.drafts,draft);
+  toast("Draft saved on this device.","success");
+});
+
+$("scheduleBtn").addEventListener("click",()=>{
+  const when=$("scheduleAt").value;
+  if(!when){toast("Choose a schedule date/time first.","error");return;}
+  const ts=new Date(when).getTime();
+  if(!Number.isFinite(ts)||ts<=Date.now()){
+    toast("Schedule must be in the future.","error");
+    return;
+  }
+  const c=createCampaign();
+  if(!c)return;
+  writeJSON("acf_scheduled_campaign",{
+    ...c,
+    runAt:ts,
+    selectedIds:[...selectedIds],
+    message:$("message").value,
+    batchSize:$("batchSize").value,
+    delayRange:$("delayRange").value
+  });
+  toast("Campaign scheduled on this device. Keep this page open for it to start.","success");
+});
+
+$("resumeBtn").addEventListener("click",()=>{
+  const s=readJSON(STORAGE.state,null);
+  if(!s)return;
+
+  $("message").value=s.message||"";
+  $("batchSize").value=String(s.batchSize||30);
+  $("delayRange").value=s.delayRange||"8-15";
+  selectedIds=new Set(s.selectedIds||[]);
+
+  const ids=new Set(s.queueIds||[]);
+  const selected=allMembers.filter(m=>ids.has(m.id));
+
+  if(!selected.length){
+    toast("Saved members are no longer available.","error");
+    return;
+  }
+
+  queue=selected;
+  currentCampaign=s.campaign;
+  queueIndex=Number(s.queueIndex)||0;
+  batchEnd=Number(s.batchEnd)||Math.min(
+    queueIndex+(Number(s.batchSize)||30),
+    queue.length
+  );
+
+  stopped=false;
+  acfQueueWaitingForReturn=false;
+
+  $("queuePanel").classList.remove("hidden");
+  $("continueBtn").classList.add("hidden");
+
+  updateQueueUI();
+
+  // If the page was refreshed after returning from WhatsApp, continue from
+  // the next member. If it was refreshed while WhatsApp was still open,
+  // the saved index remains unchanged and the user can resume.
+  openNextQueueMember();
+});
+
+$("clearResumeBtn").addEventListener("click",()=>{
+  localStorage.removeItem(STORAGE.state);
+  $("resumeBox").classList.add("hidden");
+});
+
+$("clearHistoryBtn").addEventListener("click",()=>{
+  if(confirm("Clear message history from this device?")){
+    localStorage.removeItem(STORAGE.history);
+    renderHistory();
+    updateAnalytics();
+  }
+});
+
+(function init(){
+  const draft=readJSON(STORAGE.drafts,null);
+  if(draft){
+    $("campaignName").value=draft.name||"";
+    $("message").value=draft.message||"";
+    $("batchSize").value=String(draft.batchSize||30);
+    $("delayRange").value=draft.delayRange||"8-15";
+  }
+  renderHistory();updateAnalytics();showResumeBox();
+
+  // Device-local scheduled campaign runner.
+  setInterval(()=>{
+    const s=readJSON("acf_scheduled_campaign",null);
+    if(!s || Date.now()<s.runAt || s.started)return;
+    s.started=true;writeJSON("acf_scheduled_campaign",s);
+    $("campaignName").value=s.name||"Scheduled Campaign";
+    $("message").value=s.message||"";
+    $("batchSize").value=String(s.batchSize||30);
+    $("delayRange").value=s.delayRange||"8-15";
+    selectedIds=new Set(s.selectedIds||[]);
+    const c={id:s.id,name:s.name||"Scheduled Campaign",createdAt:s.createdAt,total:0};
+    startQueue(c,0);
+    localStorage.removeItem("acf_scheduled_campaign");
+    toast("Scheduled campaign started.","success");
+  },5000);
+})();
+
+window.addEventListener("beforeunload",()=>clearTimeout(timer));
+</script>
+</body>
+</html>
