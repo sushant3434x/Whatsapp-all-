@@ -101,12 +101,16 @@ Available variables:
       <div class="glass rounded-2xl p-5">
         <h2 class="font-black text-lg mb-4">2. Member Selection</h2>
         <input id="search" class="field w-full p-3 rounded-xl text-sm" placeholder="Search name, ID or phone">
-        <div class="flex gap-2 mt-3">
-          <button data-filter="all" class="filterBtn flex-1 py-2 rounded-lg bg-indigo-600 text-xs font-bold">All</button>
-          <button data-filter="active" class="filterBtn flex-1 py-2 rounded-lg bg-slate-700 text-xs font-bold">Active</button>
-          <button data-filter="overdue" class="filterBtn flex-1 py-2 rounded-lg bg-slate-700 text-xs font-bold">Overdue</button>
+        <div class="flex gap-2 mt-3 flex-wrap">
+          <button data-filter="all" class="filterBtn flex-1 min-w-[70px] py-2 rounded-lg bg-indigo-600 text-xs font-bold">All</button>
+          <button data-filter="active" class="filterBtn flex-1 min-w-[70px] py-2 rounded-lg bg-slate-700 text-xs font-bold">Active</button>
+          <button data-filter="overdue" class="filterBtn flex-1 min-w-[70px] py-2 rounded-lg bg-slate-700 text-xs font-bold">Overdue</button>
+          <button data-filter="inactive" class="filterBtn flex-1 min-w-[70px] py-2 rounded-lg bg-slate-700 text-xs font-bold">Inactive</button>
         </div>
         <label class="flex items-center gap-2 text-xs text-slate-400 mt-3">
+          <input id="includeInactive" type="checkbox"> Include inactive members in Send All / Resume
+        </label>
+        <label class="flex items-center gap-2 text-xs text-slate-400 mt-2">
           <input id="selectAll" type="checkbox"> Select all filtered members
         </label>
       </div>
@@ -312,7 +316,75 @@ function toast(msg, type="info"){
 function normalizePhone(v){
   let p=String(v||"").replace(/\D/g,"");
   if(p.length===10) p="91"+p;
+  else if(p.length>10 && p.startsWith("91") && p.length===12) p=p;
   return p;
+}
+
+/**
+ * Deep phone scanner:
+ * - walks strings, numbers, arrays and nested Firestore objects
+ * - finds 10-digit numeric sequences anywhere inside a field
+ * - also handles values such as +91 9876543210, 9876543210,
+ *   "Call: 9876543210", nested objects and arrays
+ * - returns the first useful 10-digit number, preferring Indian mobile ranges.
+ */
+function deepScanPhoneCandidates(value, out=[], seen=new WeakSet()){
+  if(value===null || value===undefined) return out;
+
+  if(typeof value==="object"){
+    if(seen.has(value)) return out;
+    seen.add(value);
+
+    if(Array.isArray(value)){
+      for(const item of value) deepScanPhoneCandidates(item,out,seen);
+    }else{
+      for(const [key,val] of Object.entries(value)){
+        // Prefer fields whose key strongly suggests a phone/mobile/contact number.
+        if(/phone|mobile|contact|whatsapp|telephone|tel|number/i.test(key)){
+          deepScanPhoneCandidates(val,out,seen);
+        }
+      }
+      // Then scan every other field recursively.
+      for(const [key,val] of Object.entries(value)){
+        if(!/phone|mobile|contact|whatsapp|telephone|tel|number/i.test(key)){
+          deepScanPhoneCandidates(val,out,seen);
+        }
+      }
+    }
+    return out;
+  }
+
+  const s=String(value);
+  // Extract digit runs. For a 10+ digit run, use every 10-digit window;
+  // this catches both plain 10-digit numbers and +91XXXXXXXXXX.
+  const runs=s.match(/\d+/g)||[];
+  for(const run of runs){
+    if(run.length===10){
+      out.push(run);
+    }else if(run.length>10){
+      // Prefer the final 10 digits for country-code formats such as 91XXXXXXXXXX.
+      out.push(run.slice(-10));
+      for(let i=0;i+10<=run.length-10;i++) out.push(run.slice(i,i+10));
+    }
+  }
+  return out;
+}
+
+function extractDeepPhone(value){
+  const candidates=deepScanPhoneCandidates(value);
+  // Prefer normal Indian mobile numbers (6-9xxxxxxxxx), then any 10-digit number.
+  const preferred=candidates.find(p=>/^[6-9]\d{9}$/.test(p));
+  const chosen=preferred || candidates[0] || "";
+  return chosen ? "91"+chosen : "";
+}
+
+function getMemberPhone(member){
+  // Explicit phoneNumber remains highest priority.
+  const explicit=normalizePhone(member?.phoneNumber || "");
+  if(explicit) return explicit;
+
+  // Deep scan the entire Firestore document stored on this member.
+  return extractDeepPhone(member?.rawData || member || "");
 }
 
 function formatDate(v){
@@ -392,7 +464,7 @@ function getSentIndex(){
       const norm=String(cid||"").trim().toLowerCase();
       if(norm) ids.add(norm);
     }
-    const p=normalizePhone(x.phoneNumber||x.phone||"");
+    const p=normalizePhone(x.phoneNumber||x.phone||"") || extractDeepPhone(x);
     if(p) phones.add(p);
   }
   return {ids,phones};
@@ -406,7 +478,7 @@ function isHistorySentForMember(member, sentIndex=null){
   const idx=sentIndex || getSentIndex();
   const docId=String(member?.id||"").trim().toLowerCase();
   const memId=String(member?.memberId||"").trim().toLowerCase();
-  const phone=normalizePhone(member?.phoneNumber||"");
+  const phone=getMemberPhone(member);
   return (docId && idx.ids.has(docId))
     || (memId && idx.ids.has(memId))
     || (phone && idx.phones.has(phone));
@@ -549,7 +621,7 @@ function createUnsentHistory(member, reason, campaignOverride=null){
     memberId:member.id,
     memberCode:member.memberId||"",
     memberName:member.name||"Unnamed",
-    phoneNumber:member.phoneNumber||"",
+    phoneNumber:getMemberPhone(member)||"",
     reason
   });
   return historyId;
@@ -687,7 +759,7 @@ function dedupeMembers(list){
     const key=[
       String(m.name||"").trim().toLowerCase(),
       String(m.memberId||m.id||"").trim().toLowerCase(),
-      normalizePhone(m.phoneNumber||"")
+      getMemberPhone(m)
     ].join("|");
     if(seen.has(key)) continue;
     seen.add(key); out.push(m);
@@ -699,12 +771,29 @@ async function loadMembers(){
   try{
     const ref=collection(db,`artifacts/${APP_ID}/public/data/gymMembers`);
     const snap=await getDocs(ref);
-    const raw=snap.docs.map(d=>({id:d.id,...d.data()}));
+
+    // Keep the complete Firestore document in rawData so the deep phone
+    // scanner can search every field, including nested objects/arrays.
+    const raw=snap.docs.map(d=>{
+      const data=d.data() || {};
+      const member={id:d.id,...data};
+      member.rawData=data;
+      member.deepPhone=getMemberPhone(member);
+      if(!member.phoneNumber && member.deepPhone) member.phoneNumber=member.deepPhone;
+      return member;
+    });
+
     const before=raw.length;
     allMembers=dedupeMembers(raw);
     $("memberCount").textContent=`${allMembers.length} members${before!==allMembers.length?` • ${before-allMembers.length} duplicate records hidden`:""}`;
     applyFilters();
-    toast(`Loaded ${allMembers.length} unique members`,"success");
+
+    const deepFound=allMembers.filter(m=>!m.phoneNumber && m.deepPhone).length;
+    const noPhone=allMembers.filter(m=>!getMemberPhone(m)).length;
+    toast(
+      `Loaded ${allMembers.length} unique members • Deep scan ready${noPhone?` • ${noPhone} still have no 10-digit number`:""}`,
+      "success"
+    );
     showResumeBox();
   }catch(e){
     console.error(e);
@@ -716,8 +805,14 @@ function applyFilters(){
   const q=$("search").value.trim().toLowerCase();
   filteredMembers=allMembers.filter(m=>{
     const status=statusFor(m);
-    const modeOK=filterMode==="all" || (filterMode==="active" && status==="Active") || (filterMode==="overdue" && status==="Overdue");
-    const text=`${m.name||""} ${m.memberId||""} ${m.phoneNumber||""}`.toLowerCase();
+    const modeOK=
+      filterMode==="all" ||
+      (filterMode==="active" && status==="Active") ||
+      (filterMode==="overdue" && status==="Overdue") ||
+      (filterMode==="inactive" && status==="Inactive");
+
+    const resolvedPhone=getMemberPhone(m);
+    const text=`${m.name||""} ${m.memberId||""} ${m.phoneNumber||""} ${resolvedPhone||""}`.toLowerCase();
     return modeOK && text.includes(q);
   });
   renderMembers();
@@ -761,7 +856,10 @@ function renderMembers(){
     tr.innerHTML=`
       <td class="p-3"><input type="checkbox" class="memberCheck" data-id="${escapeHtml(m.id)}" ${checked?"checked":""}></td>
       <td class="p-3"><div class="font-bold">${escapeHtml(m.name||"Unnamed")}</div><div class="text-[11px] text-slate-500">${escapeHtml(m.memberId||m.id)}</div></td>
-      <td class="p-3 text-xs">${escapeHtml(m.phoneNumber||"—")}</td>
+      <td class="p-3 text-xs">
+        ${escapeHtml(getMemberPhone(m)||"—")}
+        ${(!m.phoneNumber && getMemberPhone(m)) ? '<div class="text-[9px] text-cyan-400">Deep scan</div>' : ''}
+      </td>
       <td class="p-3 text-xs">${escapeHtml(m.membershipType||"—")}</td>
       <td class="p-3 text-xs">${formatDate(m.dueDate)}</td>
       <td class="p-3"><span class="pill ${status==="Overdue"?"bg-red-900 text-red-200":status==="Inactive"?"bg-slate-700 text-slate-300":"bg-green-900 text-green-200"}">${status}</span></td>
@@ -835,7 +933,7 @@ function updateQueueUI(){
   $("remainingCount").textContent=Math.max(total-handled,0);
   $("progressBar").style.width=(total?Math.min(100,handled/total*100):0)+"%";
   $("currentName").textContent=current?(current.name||"Unnamed"):"Batch complete";
-  $("currentPhone").textContent=current?(current.phoneNumber||"No phone"):"";
+  $("currentPhone").textContent=current?(getMemberPhone(current)||"No phone"):"";
   const bs=Number($("batchSize").value)||30;
   const batchStart=Math.floor(handled/bs)*bs;
   $("batchProgress").textContent=`${Math.max(0,handled-batchStart)} / ${Math.min(bs,total-batchStart)}`;
@@ -858,7 +956,7 @@ let acfQueueLastAdvanceAt=0;
 
 function openWhatsApp(member, isRetry=false, campaignOverride=null){
   const camp=campaignOverride || currentCampaign;
-  const phone=normalizePhone(member.phoneNumber);
+  const phone=getMemberPhone(member);
   if(!phone){
     if(!isRetry) createUnsentHistory(member,"Phone number is missing", camp);
     else toast(`Phone number is missing for ${member.name||"member"}.`,"error");
