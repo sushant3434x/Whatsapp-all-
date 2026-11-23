@@ -108,7 +108,7 @@ Available variables:
           <button data-filter="inactive" class="filterBtn flex-1 min-w-[70px] py-2 rounded-lg bg-slate-700 text-xs font-bold">Inactive</button>
         </div>
         <label class="flex items-center gap-2 text-xs text-slate-400 mt-3">
-          <input id="includeInactive" type="checkbox"> Include inactive members in Send All / Resume (selected members always included)
+          <input id="includeInactive" type="checkbox"> Include inactive members in Send All / Resume (explicitly selected members are always included)
         </label>
         <label class="flex items-center gap-2 text-xs text-slate-400 mt-2">
           <input id="selectAll" type="checkbox"> Select all filtered members
@@ -941,15 +941,29 @@ function updateQueueUI(){
 }
 
 function createCampaign(){
-  // IMPORTANT: explicit member selection always wins. If the user selected
-  // inactive members, Start must send them even when the global Include
-  // Inactive checkbox is OFF. That checkbox is only for Send All / Resume
-  // when no explicit selection is being made.
-  let selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)));
-  if(!selected.length){toast("Select at least one member","error");return null;}
-  if(!$("message").value.trim()){toast("Write a message first","error");return null;}
-  return {id:campaignId(),name:$("campaignName").value.trim()||"WhatsApp Campaign",
-    createdAt:new Date().toISOString(),total:selected.length,skipAlreadySent:shouldSkipAlreadySent()};
+  // Explicit checkbox selection is the source of truth for Start Message Queue.
+  // Include Inactive must NEVER remove an explicitly selected member.
+  const selectedIdsSnapshot=[...selectedIds];
+  const selected=dedupeMembers(allMembers.filter(m=>selectedIdsSnapshot.includes(m.id)));
+
+  if(!selected.length){
+    toast("Select at least one member","error");
+    return null;
+  }
+  if(!$("message").value.trim()){
+    toast("Write a message first","error");
+    return null;
+  }
+
+  return {
+    id:campaignId(),
+    name:$("campaignName").value.trim()||"WhatsApp Campaign",
+    createdAt:new Date().toISOString(),
+    total:selected.length,
+    selectedIds:selectedIdsSnapshot,
+    selectedMemberCount:selected.length,
+    skipAlreadySent:shouldSkipAlreadySent()
+  };
 }
 
 
@@ -986,7 +1000,7 @@ function openWhatsApp(member, isRetry=false, campaignOverride=null){
       memberId:member.id,
       memberCode:member.memberId||"",
       memberName:member.name||"Unnamed",
-      phoneNumber:member.phoneNumber||"",
+      phoneNumber:getMemberPhone(member)||"",
       retryOf:isRetry?retryHistoryId:null,
       manual:!!campaignOverride
     });
@@ -1018,7 +1032,7 @@ function manualSendMember(memberId){
   };
 
   // Missing phone -> record as Unsent in history and notify user.
-  const phone=normalizePhone(member.phoneNumber);
+  const phone=getMemberPhone(member);
   if(!phone){
     createUnsentHistory(member,"Phone number is missing", manualCampaign);
     toast(`Phone number is missing for ${member.name||"member"}. Recorded as Unsent.`,"error");
@@ -1042,7 +1056,7 @@ function manualSendMember(memberId){
     memberId:member.id,
     memberCode:member.memberId||"",
     memberName:member.name||"Unnamed",
-    phoneNumber:member.phoneNumber||"",
+    phoneNumber:getMemberPhone(member)||"",
     campaignId:manualCampaign.id,
     campaignName:manualCampaign.name,
     openedAt:Date.now()
@@ -1102,7 +1116,7 @@ function openNextQueueMember(){
       memberId:member.id,
       memberCode:member.memberId||"",
       memberName:member.name||"Unnamed",
-      phoneNumber:member.phoneNumber||"",
+      phoneNumber:getMemberPhone(member)||"",
       reason:"Already marked Sent in history"
     });
     queueIndex++;
@@ -1113,7 +1127,7 @@ function openNextQueueMember(){
   }
 
   // No phone number: record as UNSENT and immediately move to the next member.
-  if(!normalizePhone(member.phoneNumber)){
+  if(!getMemberPhone(member)){
     createUnsentHistory(member,"Phone number is missing");
     queueIndex++;
     saveQueueState();
@@ -1187,7 +1201,7 @@ function advanceQueueAfterReturn(){
       memberId:member.id,
       memberCode:member.memberId||"",
       memberName:member.name||"Unnamed",
-      phoneNumber:member.phoneNumber||"",
+      phoneNumber:getMemberPhone(member)||"",
       sentAt:new Date().toISOString()
     });
     queueIndex++;
@@ -1225,10 +1239,19 @@ window.addEventListener("focus",()=>{
 
 function startQueue(campaign,startIndex=0){
   if(!campaign)return;
-  // Explicitly selected members are always eligible, including Inactive.
-  // The Include Inactive switch must never silently remove a member the user
-  // deliberately selected.
-  let selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)));
+
+  // FIX: use the exact selection captured when Start was pressed.
+  // This is deliberately NOT filtered by Include Inactive.
+  const ids=Array.isArray(campaign.selectedIds)
+    ? new Set(campaign.selectedIds)
+    : new Set(selectedIds);
+
+  let selected=dedupeMembers(allMembers.filter(m=>ids.has(m.id)));
+
+  if(!selected.length){
+    toast("No selected members are available to start.","error");
+    return;
+  }
 
   if(shouldSkipAlreadySent()){
     const sent=getSentIndex(),before=selected.length;
@@ -1242,20 +1265,28 @@ function startQueue(campaign,startIndex=0){
     return;
   }
 
+  campaign.selectedIds=[...ids];
+
   queue=selected;
   currentCampaign=campaign;
   queueIndex=Math.min(Number(startIndex)||0,queue.length);
   const bs=Number($("batchSize").value)||30;
   batchEnd=Math.min(Math.floor(queueIndex/bs)*bs+bs,queue.length);
-  stopped=false;acfQueueWaitingForReturn=false;
+  stopped=false;
+  acfQueueWaitingForReturn=false;
+
   $("queuePanel").classList.remove("hidden");
   $("continueBtn").classList.add("hidden");
-  updateQueueUI();saveQueueState();openNextQueueMember();
+  updateQueueUI();
+  saveQueueState();
+  openNextQueueMember();
 }
 
 $("startBtn").addEventListener("click",()=>{
   const c=createCampaign();
-  if(c)startQueue(c,0);
+  if(!c)return;
+  toast(`Starting ${c.selectedMemberCount} selected member(s). Inactive members are included.`,"info");
+  startQueue(c,0);
 });
 
 /**
@@ -1487,4 +1518,4 @@ $("clearHistoryBtn").addEventListener("click",()=>{
 window.addEventListener("beforeunload",()=>clearTimeout(timer));
 </script>
 </body>
-</html>
+  </html>
