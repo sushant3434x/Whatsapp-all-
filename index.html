@@ -108,7 +108,7 @@ Available variables:
           <button data-filter="inactive" class="filterBtn flex-1 min-w-[70px] py-2 rounded-lg bg-slate-700 text-xs font-bold">Inactive</button>
         </div>
         <label class="flex items-center gap-2 text-xs text-slate-400 mt-3">
-          <input id="includeInactive" type="checkbox"> Include inactive members in Send All / Resume
+          <input id="includeInactive" type="checkbox"> Include inactive members in Send All / Resume (selected members always included)
         </label>
         <label class="flex items-center gap-2 text-xs text-slate-400 mt-2">
           <input id="selectAll" type="checkbox"> Select all filtered members
@@ -941,8 +941,11 @@ function updateQueueUI(){
 }
 
 function createCampaign(){
+  // IMPORTANT: explicit member selection always wins. If the user selected
+  // inactive members, Start must send them even when the global Include
+  // Inactive checkbox is OFF. That checkbox is only for Send All / Resume
+  // when no explicit selection is being made.
   let selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)));
-  if(!shouldIncludeInactive()) selected=selected.filter(m=>statusFor(m)!=="Inactive");
   if(!selected.length){toast("Select at least one member","error");return null;}
   if(!$("message").value.trim()){toast("Write a message first","error");return null;}
   return {id:campaignId(),name:$("campaignName").value.trim()||"WhatsApp Campaign",
@@ -1222,8 +1225,10 @@ window.addEventListener("focus",()=>{
 
 function startQueue(campaign,startIndex=0){
   if(!campaign)return;
+  // Explicitly selected members are always eligible, including Inactive.
+  // The Include Inactive switch must never silently remove a member the user
+  // deliberately selected.
   let selected=dedupeMembers(allMembers.filter(m=>selectedIds.has(m.id)));
-  if(!shouldIncludeInactive()) selected=selected.filter(m=>statusFor(m)!=="Inactive");
 
   if(shouldSkipAlreadySent()){
     const sent=getSentIndex(),before=selected.length;
